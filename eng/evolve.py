@@ -119,16 +119,15 @@ def evaluate_policy(policy,
     fitness = avg_reward + success_rate * 0.6
     return fitness, avg_reward, success_rate
 
+from eng.io_policies import load_policy_npz  # put this near the top of evolve.py
+
+
 def _load_policy_npz(path, policy_kind):
-    import numpy as np
-    d = np.load(path)
-    if policy_kind == "mlp":
-        from eng.policies_mlp import MLPPolicy
-        params = [d["W1"], d["b1"], d["W2"], d["b2"], d["W3"], d["b3"]]
-        return MLPPolicy(params)
-    else:
-        from eng.policies import LinearPolicy
-        return LinearPolicy(d["W"], d["b"])
+    """
+    Thin wrapper that delegates to the unified loader in eng.io_policies.
+    Ignores policy_kind, since the .npz already encodes 'kind'.
+    """
+    return load_policy_npz(path)
 
 def save_policy_npz(p, path):
     import numpy as np
