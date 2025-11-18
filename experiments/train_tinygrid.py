@@ -25,16 +25,14 @@ from eng.evolve import GAConfig, run_ga
 from tasks.tinygrid import TinyGrid
 
 
-def save_policy(policy, path_npz):
-    """Save policy weights (supports linear and MLP)."""
-    os.makedirs(os.path.dirname(path_npz), exist_ok=True)
-    if hasattr(policy, "W"):  # LinearPolicy
-        np.savez(path_npz, W=policy.W, b=policy.b, kind="linear")
-    else:
-        # MLPPolicy
-        W1, b1, W2, b2, W3, b3 = policy.params
-        np.savez(path_npz, W1=W1, b1=b1, W2=W2, b2=b2, W3=W3, b3=b3, kind="mlp")
+from eng.io_policies import load_policy_npz  # already used in evolve
+from eng.evolve import save_policy_npz      # we defined this earlier
 
+
+def save_policy(policy, path_npz):
+    """Save policy (linear or MLP) using the same logic as training/checkpoints."""
+    os.makedirs(os.path.dirname(path_npz), exist_ok=True)
+    save_policy_npz(policy, path_npz)
 
 def main():
     ap = argparse.ArgumentParser(description="Train an evolutionary TinyGrid agent.")
@@ -77,7 +75,8 @@ def main():
     )
 
     # Run GA (multi-core)
-    print(f"🧠 Starting GA with {os.cpu_count()} CPU cores...")
+    n_procs = args.processes or os.cpu_count()
+    print(f"🧠 Starting GA with {n_procs} worker processes (system cores: {os.cpu_count()})...")
     winner, history = run_ga(
         env_ctor=TinyGrid,
         env_kwargs={"max_steps": args.max_steps},
