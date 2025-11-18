@@ -52,6 +52,12 @@ def main():
     ap.add_argument("--mutation_sigma_floor", type=float, default=0.06)
     ap.add_argument("--init_policy", type=str, default=None,
                 help="Path to a .npz champion to seed the initial population")
+    ap.add_argument(
+    "--processes",
+    type=int,
+    default=None,
+    help="Number of worker processes for GA evaluation (default: use all CPU cores)",
+)
     args = ap.parse_args()
 
     # Configure GA
@@ -67,6 +73,7 @@ def main():
         init_policy=args.init_policy,   # NEW
         policy=args.policy,
         generations=args.generations,
+        processes=args.processes,  
     )
 
     # Run GA (multi-core)
