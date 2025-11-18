@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Tuple, Optional, Dict, Any
 import numpy as np
 import multiprocessing as mp
+import os, numpy as np
 
 # Policies
 from eng.policies import LinearPolicy
@@ -104,7 +105,8 @@ def evaluate_policy(policy,
         steps = 0
         ep_reward = 0.0
         while not done and steps < max_steps:
-            action = policy.act(obs, explore=False)  # <- greedy
+            logits = policy(obs)          # works for LinearPolicy and MLPPolicy
+            action = int(np.argmax(logits))
             obs, reward, done, _ = env.step(action)
             ep_reward += reward
             steps += 1
@@ -127,6 +129,70 @@ def _load_policy_npz(path, policy_kind):
     else:
         from eng.policies import LinearPolicy
         return LinearPolicy(d["W"], d["b"])
+
+def save_policy_npz(p, path):
+    import numpy as np
+
+    if hasattr(p, "as_dict"):
+        np.savez_compressed(path, **p.as_dict())
+        return
+
+    # Linear variants
+    if hasattr(p, "W") and hasattr(p, "b"):
+        np.savez_compressed(path, W=p.W, b=p.b, kind="linear")
+        return
+
+    # MLP variants
+    if hasattr(p, "layers"):  # list[(W,b), ...]
+        params = {}
+        for i, (W, b) in enumerate(p.layers):
+            params[f"W{i}"] = W
+            params[f"b{i}"] = b
+        np.savez_compressed(path, **params, kind="mlp")
+        return
+
+    if hasattr(p, "params"):  # list of arrays: [W1,b1,W2,b2,W3,b3]
+        arrs = list(p.params)
+        params = {}
+        # try to pair as (W,b)
+        j = 0
+        k = 0
+        while j < len(arrs):
+            W = arrs[j]; b = arrs[j+1] if j+1 < len(arrs) else None
+            params[f"W{k}"] = W
+            if b is not None:
+                params[f"b{k}"] = b
+            j += 2; k += 1
+        np.savez_compressed(path, **params, kind="mlp")
+        return
+
+    # Dict-like (some mutate/crossover return dicts)
+    if isinstance(p, dict):
+        keys = set(p.keys())
+        if {"W","b"}.issubset(keys):
+            np.savez_compressed(path, W=p["W"], b=p["b"], kind="linear")
+            return
+        # accept W0/b0,... pattern
+        if any(k.startswith("W0") for k in keys) or any(k.startswith("W") for k in keys):
+            np.savez_compressed(path, **p, kind=p.get("kind","mlp"))
+            return
+
+    # Last resort: try common attribute names W1,b1,...
+    cand = {}
+    for i in range(6):  # up to 6 layers if needed
+        Wi = getattr(p, f"W{i}", None)
+        bi = getattr(p, f"b{i}", None)
+        if Wi is not None:
+            cand[f"W{i}"] = Wi
+        if bi is not None:
+            cand[f"b{i}"] = bi
+    if cand:
+        np.savez_compressed(path, **cand, kind="mlp")
+        return
+
+    # Couldn’t detect format
+    import warnings
+    warnings.warn(f"[save_policy_npz] Unknown policy type: {type(p)}; attributes={dir(p)[:20]}")
 
 
 # -------- Parallel worker --------
@@ -153,37 +219,87 @@ def _eval_worker(args):
 # Genetic operators
 # ----------------------------
 def mutate(policy, sigma: float, rng: np.random.RandomState):
+    """
+    Create a mutated clone of `policy`.
+    Supports:
+      - LinearPolicy with W, b
+      - MLPPolicy with .layers = [(W, b), ...]
+      - (optionally) older policies with .params list
+    """
     child = policy.clone()
-    # Linear policy has W, b; MLP policy has params list
-    if hasattr(child, "W"):
+
+    # LinearPolicy: W, b
+    if hasattr(child, "W") and hasattr(child, "b"):
         child.W += rng.normal(0.0, sigma, size=child.W.shape).astype(child.W.dtype)
         child.b += rng.normal(0.0, sigma, size=child.b.shape).astype(child.b.dtype)
-    else:
-        # Assume .params contains arrays
+        return child
+
+    # MLPPolicy: layers = list of (W, b)
+    if hasattr(child, "layers"):
+        new_layers = []
+        for (W, b) in child.layers:
+            Wm = W + rng.normal(0.0, sigma, size=W.shape).astype(W.dtype)
+            bm = b + rng.normal(0.0, sigma, size=b.shape).astype(b.dtype)
+            new_layers.append((Wm, bm))
+        child.layers = new_layers
+        return child
+
+    # Fallback: legacy .params list
+    if hasattr(child, "params"):
         new_params = []
         for p in child.params:
             new_params.append(p + rng.normal(0.0, sigma, size=p.shape).astype(p.dtype))
         child.params = new_params
-    return child
+        return child
+
+    raise ValueError(f"Unknown policy type for mutation: {type(policy)}")
 
 
 def crossover(p1, p2, rate: float, rng: np.random.RandomState):
+    """
+    Uniform crossover between two parents.
+    Supports:
+      - LinearPolicy with W, b
+      - MLPPolicy with .layers = [(W, b), ...]
+      - (optionally) older policies with .params
+    """
     c = p1.clone()
-    if rng.rand() < rate:
-        if hasattr(c, "W"):
-            # Linear: per-weight uniform crossover
-            maskW = rng.rand(*c.W.shape) < 0.5
-            c.W[maskW] = p2.W[maskW]
-            maskb = rng.rand(*c.b.shape) < 0.5
-            c.b[maskb] = p2.b[maskb]
-        else:
-            # MLP (params list)
-            new_params = []
-            for a, b in zip(c.params, p2.params):
-                mask = rng.rand(*a.shape) < 0.5
-                new_params.append(np.where(mask, b, a))
-            c.params = new_params
-    return c
+
+    if rng.rand() >= rate:
+        return c  # no crossover, just a clone
+
+    # LinearPolicy: W, b
+    if hasattr(c, "W") and hasattr(c, "b") and hasattr(p2, "W") and hasattr(p2, "b"):
+        maskW = rng.rand(*c.W.shape) < 0.5
+        c.W[maskW] = p2.W[maskW]
+        maskb = rng.rand(*c.b.shape) < 0.5
+        c.b[maskb] = p2.b[maskb]
+        return c
+
+    # MLPPolicy: layers = list of (W, b)
+    if hasattr(c, "layers") and hasattr(p2, "layers"):
+        new_layers = []
+        for (Wa, ba), (Wb, bb) in zip(c.layers, p2.layers):
+            # crossover weights
+            maskW = rng.rand(*Wa.shape) < 0.5
+            Wc = np.where(maskW, Wb, Wa)
+            # crossover biases
+            maskb = rng.rand(*ba.shape) < 0.5
+            bc = np.where(maskb, bb, ba)
+            new_layers.append((Wc, bc))
+        c.layers = new_layers
+        return c
+
+    # Fallback: legacy .params list
+    if hasattr(c, "params") and hasattr(p2, "params"):
+        new_params = []
+        for a, b in zip(c.params, p2.params):
+            mask = rng.rand(*a.shape) < 0.5
+            new_params.append(np.where(mask, b, a))
+        c.params = new_params
+        return c
+
+    raise ValueError(f"Unknown policy type for crossover: {type(p1)}, {type(p2)}")
 
 
 # ----------------------------
@@ -283,6 +399,19 @@ def run_ga(
             f"sigma {stats['sigma']:.4f} | procs {n_proc}"
         )
 
+        # ---- Checkpoints every N generations ----
+        # You can hardcode N or later add a cfg.checkpoint_interval
+        if gen % 20 == 0:
+            os.makedirs("artifacts/checkpoints", exist_ok=True)
+            K = 3  # save top-3
+            for rank in range(min(K, len(order))):
+                idx = order[rank]
+                p = pop[idx]
+                bf = float(fitness[idx])
+                path = f"artifacts/checkpoints/gen{gen:04d}_rank{rank+1}_f{bf:+.3f}.npz"
+                save_policy_npz(p, path)
+
+
         # ---- Reproduction ----
         new_pop: List[Any] = elites.copy()
         while len(new_pop) < cfg.pop_size:
@@ -293,6 +422,8 @@ def run_ga(
         pop = new_pop
         sigma *= cfg.sigma_decay
         sigma = max(sigma, cfg.mutation_sigma_floor)  # NEW
+
+   
 
     # Final pick of winner (deterministic greedy eval)
     # We evaluate single-process here for simplicity; you can parallelize similarly if desired.

@@ -1,64 +1,79 @@
-import argparse, os, sys, numpy as np
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+# experiments/eval_policy.py
+
+import argparse
+import numpy as np
 
 from tasks.tinygrid import TinyGrid
-from eng.policies import LinearPolicy
-
-try:
-    from eng.policies_mlp import MLPPolicy
-except Exception:
-    MLPPolicy = None
+from eng.io_policies import load_policy_npz   # unified loader
 
 
-def load_policy(path: str):
-    """Load linear or MLP policy from npz file."""
-    data = np.load(path)
-    kind = str(data.get("kind", "linear"))
-    if kind == "mlp" and MLPPolicy is not None:
-        params = [data["W1"], data["b1"], data["W2"], data["b2"], data["W3"], data["b3"]]
-        return MLPPolicy(params)
-    else:
-        return LinearPolicy(data["W"], data["b"])
+def run_episode(policy, seed: int, max_steps: int):
+    """
+    Run one episode of TinyGrid with a given policy and seed.
+    Returns (total_reward, success_flag).
+    Success = reached goal after using key/door in the proper order.
+    """
+    env = TinyGrid(max_steps=max_steps)
+    obs = env.reset(seed=seed)
+    total = 0.0
+    success = False
 
+    for t in range(max_steps):
+        logits = policy(obs)          # shape (5,)
+        action = int(np.argmax(logits))
+        obs, reward, done, _info = env.step(action)
+        total += reward
 
-def eval_many(policy, seeds=50, max_steps=300):
-    """Run multiple episodes to estimate success rate and average reward."""
-    wins = 0
-    total_reward = 0.0
+        if done:
+            # Strict success: must have used key and be on goal tile
+            if env.used_key and env.agent == env.goal_pos:
+                success = True
+            break
 
-    for s in range(seeds):
-        env = TinyGrid(max_steps=max_steps)
-        obs = env.reset(seed=s)
-        done = False
-        ep_reward = 0.0
-        steps = 0
-        while not done and steps < max_steps:
-            action = policy.act(obs, explore=False)
-            obs, reward, done, _ = env.step(action)
-            ep_reward += reward
-            steps += 1
-
-        if ep_reward >= 0.99:  # considered success
-            wins += 1
-        total_reward += ep_reward
-
-    success_rate = wins / seeds
-    avg_reward = total_reward / seeds
-    return success_rate, avg_reward
+    return total, success
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate a trained TinyGrid policy.")
-    ap.add_argument("--policy", required=True, help="Path to the policy npz file")
-    ap.add_argument("--seeds", type=int, default=50, help="Number of random seeds to test")
-    ap.add_argument("--max_steps", type=int, default=300)
+    ap = argparse.ArgumentParser(description="Evaluate a TinyGrid policy over many seeds.")
+    ap.add_argument(
+        "--policy",
+        type=str,
+        required=True,
+        help="Path to .npz policy file (e.g. artifacts/best_mlp_policy.npz)",
+    )
+    ap.add_argument(
+        "--seeds",
+        type=int,
+        default=50,
+        help="Number of different env seeds to evaluate.",
+    )
+    ap.add_argument(
+        "--max_steps",
+        type=int,
+        default=300,
+        help="Max steps per episode.",
+    )
     args = ap.parse_args()
 
-    policy = load_policy(args.policy)
-    success_rate, avg_reward = eval_many(policy, seeds=args.seeds, max_steps=args.max_steps)
+    # Load policy (handles linear & mlp)
+    policy = load_policy_npz(args.policy)
+
+    rewards = []
+    successes = 0
+
+    base_seed = 0
+    for i in range(args.seeds):
+        seed = base_seed + i
+        R, ok = run_episode(policy, seed, args.max_steps)
+        rewards.append(R)
+        if ok:
+            successes += 1
+
+    success_rate = successes / args.seeds
+    avg_reward = float(np.mean(rewards)) if rewards else 0.0
 
     print(f"✅ Evaluated {args.seeds} episodes")
-    print(f"Success rate: {success_rate*100:.1f}%")
+    print(f"Success rate: {success_rate * 100:.1f}%")
     print(f"Average reward: {avg_reward:+.3f}")
 
 
