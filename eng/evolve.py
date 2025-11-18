@@ -357,72 +357,81 @@ def run_ga(
     ctx = mp.get_context("spawn")
     n_proc = cfg.processes or mp.cpu_count()
 
-    for gen in range(1, cfg.generations + 1):
-        # ---- Parallel evaluation ----
-        jobs = []
-        for i, pol in enumerate(pop):
-            seed_i = int(rng.randint(0, 2**31 - 1))
-            if have_local_factory:
-                # Fallback path: use single-process evaluation to avoid pickling lambda/env_factory
-                # (We still batch this loop, so performance will be lower.)
-                f, r, s = evaluate_policy(pol, env_maker_local, cfg.episodes, cfg.max_steps, np.random.RandomState(seed_i))
-                fitness[i], avg_rewards[i], success_rates[i] = f, r, s
-            else:
-                jobs.append((pol, cfg.episodes, cfg.max_steps, seed_i, env_ctor, env_kwargs or {}))
+    # Create pool ONCE (if we can use env_ctor)
+    pool = None
+    if not have_local_factory:
+        pool = ctx.Pool(processes=n_proc)
 
-        if not have_local_factory:
-            with ctx.Pool(processes=n_proc) as pool:
-                results = pool.map(_eval_worker, jobs)
-            for i, (f, r, s) in enumerate(results):
-                fitness[i], avg_rewards[i], success_rates[i] = f, r, s
+    try:
+        for gen in range(1, cfg.generations + 1):
+            # ---- Parallel evaluation ----
+            jobs = []
+            for i, pol in enumerate(pop):
+                seed_i = int(rng.randint(0, 2**31 - 1))
+                if have_local_factory:
+                    # Fallback path: use single-process evaluation to avoid pickling lambda/env_factory
+                    # (We still batch this loop, so performance will be lower.)
+                    f, r, s = evaluate_policy(pol, env_maker_local, cfg.episodes, cfg.max_steps, np.random.RandomState(seed_i))
+                    fitness[i], avg_rewards[i], success_rates[i] = f, r, s
+                else:
+                    jobs.append((pol, cfg.episodes, cfg.max_steps, seed_i, env_ctor, env_kwargs or {}))
 
-        # ---- Selection & logging ----
-        order = np.argsort(fitness)[::-1]
-        elites = [pop[i] for i in order[:cfg.elites]]
-        best_idx = int(order[0])
-        stats = {
-            "gen": gen,
-            "best_f": float(fitness[best_idx]),
-            "best_r": float(avg_rewards[best_idx]),
-            "best_s": float(success_rates[best_idx]),
-            "mean_f": float(fitness.mean()),
-            "mean_r": float(avg_rewards.mean()),
-            "mean_s": float(success_rates.mean()),
-            "sigma": float(sigma),
-        }
-        history.append(stats)
-        print(
-            f"Gen {gen:03d} | "
-            f"best_f {stats['best_f']:+.3f} (r {stats['best_r']:+.3f}, s {stats['best_s']:.2f}) | "
-            f"mean_f {stats['mean_f']:+.3f} (r {stats['mean_r']:+.3f}, s {stats['mean_s']:.2f}) | "
-            f"sigma {stats['sigma']:.4f} | procs {n_proc}"
-        )
+            if not have_local_factory:
+                with ctx.Pool(processes=n_proc) as pool:
+                    results = pool.map(_eval_worker, jobs)
+                for i, (f, r, s) in enumerate(results):
+                    fitness[i], avg_rewards[i], success_rates[i] = f, r, s
 
-        # ---- Checkpoints every N generations ----
-        # You can hardcode N or later add a cfg.checkpoint_interval
-        if gen % 20 == 0:
-            os.makedirs("artifacts/checkpoints", exist_ok=True)
-            K = 3  # save top-3
-            for rank in range(min(K, len(order))):
-                idx = order[rank]
-                p = pop[idx]
-                bf = float(fitness[idx])
-                path = f"artifacts/checkpoints/gen{gen:04d}_rank{rank+1}_f{bf:+.3f}.npz"
-                save_policy_npz(p, path)
+            # ---- Selection & logging ----
+            order = np.argsort(fitness)[::-1]
+            elites = [pop[i] for i in order[:cfg.elites]]
+            best_idx = int(order[0])
+            stats = {
+                "gen": gen,
+                "best_f": float(fitness[best_idx]),
+                "best_r": float(avg_rewards[best_idx]),
+                "best_s": float(success_rates[best_idx]),
+                "mean_f": float(fitness.mean()),
+                "mean_r": float(avg_rewards.mean()),
+                "mean_s": float(success_rates.mean()),
+                "sigma": float(sigma),
+            }
+            history.append(stats)
+            print(
+                f"Gen {gen:03d} | "
+                f"best_f {stats['best_f']:+.3f} (r {stats['best_r']:+.3f}, s {stats['best_s']:.2f}) | "
+                f"mean_f {stats['mean_f']:+.3f} (r {stats['mean_r']:+.3f}, s {stats['mean_s']:.2f}) | "
+                f"sigma {stats['sigma']:.4f} | procs {n_proc}"
+            )
+
+            # ---- Checkpoints every N generations ----
+            # You can hardcode N or later add a cfg.checkpoint_interval
+            if gen % 20 == 0:
+                os.makedirs("artifacts/checkpoints", exist_ok=True)
+                K = 3  # save top-3
+                for rank in range(min(K, len(order))):
+                    idx = order[rank]
+                    p = pop[idx]
+                    bf = float(fitness[idx])
+                    path = f"artifacts/checkpoints/gen{gen:04d}_rank{rank+1}_f{bf:+.3f}.npz"
+                    save_policy_npz(p, path)
 
 
-        # ---- Reproduction ----
-        new_pop: List[Any] = elites.copy()
-        while len(new_pop) < cfg.pop_size:
-            p1, p2 = rng.choice(elites), rng.choice(pop)
-            child = crossover(p1, p2, cfg.crossover_rate, rng)
-            child = mutate(child, sigma, rng)
-            new_pop.append(child)
-        pop = new_pop
-        sigma *= cfg.sigma_decay
-        sigma = max(sigma, cfg.mutation_sigma_floor)  # NEW
+            # ---- Reproduction ----
+            new_pop: List[Any] = elites.copy()
+            while len(new_pop) < cfg.pop_size:
+                p1, p2 = rng.choice(elites), rng.choice(pop)
+                child = crossover(p1, p2, cfg.crossover_rate, rng)
+                child = mutate(child, sigma, rng)
+                new_pop.append(child)
+            pop = new_pop
+            sigma *= cfg.sigma_decay
+            sigma = max(sigma, cfg.mutation_sigma_floor)  # NEW
 
-   
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     # Final pick of winner (deterministic greedy eval)
     # We evaluate single-process here for simplicity; you can parallelize similarly if desired.
