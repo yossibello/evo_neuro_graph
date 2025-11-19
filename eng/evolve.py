@@ -4,6 +4,7 @@ from typing import Callable, List, Tuple, Optional, Dict, Any
 import numpy as np
 import multiprocessing as mp
 import os, numpy as np
+from eng.policies_graph import GraphPolicy  # NEW
 
 # Policies
 from eng.policies import LinearPolicy
@@ -84,6 +85,8 @@ def make_policy(kind: str):
             raise ValueError("MLP requested but eng/policies_mlp.py not found.")
         from eng.policies_mlp import MLPPolicy
         return MLPPolicy()
+    if kind == "graph":  # NEW
+        return GraphPolicy()
     raise ValueError(f"Unknown policy kind: {kind}")
 
 
@@ -232,6 +235,20 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
         child.W += rng.normal(0.0, sigma, size=child.W.shape).astype(child.W.dtype)
         child.b += rng.normal(0.0, sigma, size=child.b.shape).astype(child.b.dtype)
         return child
+    
+    # ----- GraphPolicy: numeric + structural -----
+    if isinstance(child, GraphPolicy):
+        # numeric mutation on node_params via .params
+        new_params = []
+        for p in child.params:
+            new_params.append(
+                p + rng.normal(0.0, sigma, size=p.shape).astype(p.dtype)
+            )
+        child.params = new_params
+        # structural mutations
+        child.structural_mutate(rng)
+        return child
+
 
     # MLPPolicy: layers = list of (W, b)
     if hasattr(child, "layers"):
@@ -256,18 +273,48 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
 
 def crossover(p1, p2, rate: float, rng: np.random.RandomState):
     """
-    Uniform crossover between two parents.
-    Supports:
-      - LinearPolicy with W, b
-      - MLPPolicy with .layers = [(W, b), ...]
-      - (optionally) older policies with .params
+    Crossover between two policies.
+
+    - For LinearPolicy: per-weight uniform crossover on W, b.
+    - For generic MLP-like with .params: elementwise uniform crossover.
+    - For GraphPolicy: row-wise crossover on overlapping part of node_params,
+      allowing different numbers of nodes in each parent.
     """
     c = p1.clone()
-
     if rng.rand() >= rate:
-        return c  # no crossover, just a clone
+        return c
 
-    # LinearPolicy: W, b
+    # ----- GraphPolicy: variable-length node_params -----
+    from eng.policies_graph import GraphPolicy  # local import to avoid circular issues
+
+    if isinstance(c, GraphPolicy) and hasattr(p2, "node_params"):
+        A = c.node_params          # (Na, 8)
+        B = p2.node_params         # (Nb, 8)
+        Na, D = A.shape
+        Nb, Db = B.shape
+        assert D == Db == 8
+
+        # Overlap region
+        n = min(Na, Nb)
+        if n > 0:
+            mask = rng.rand(n, D) < 0.5
+            A_new = A.copy()
+            # mix rows 0..n-1
+            A_new[:n] = np.where(mask, B[:n], A[:n])
+        else:
+            A_new = A.copy()
+
+        # Optionally, sometimes adopt extra nodes from the longer parent
+        # (this keeps structure diversity alive)
+        if Nb > Na and rng.rand() < 0.5:
+            extra = B[n:Nb].copy()
+            A_new = np.vstack([A_new, extra])
+
+        c.node_params = A_new
+        c._sync_params_list()
+        return c
+
+    # ----- LinearPolicy: has W, b -----
     if hasattr(c, "W") and hasattr(c, "b") and hasattr(p2, "W") and hasattr(p2, "b"):
         maskW = rng.rand(*c.W.shape) < 0.5
         c.W[maskW] = p2.W[maskW]
@@ -275,31 +322,21 @@ def crossover(p1, p2, rate: float, rng: np.random.RandomState):
         c.b[maskb] = p2.b[maskb]
         return c
 
-    # MLPPolicy: layers = list of (W, b)
-    if hasattr(c, "layers") and hasattr(p2, "layers"):
-        new_layers = []
-        for (Wa, ba), (Wb, bb) in zip(c.layers, p2.layers):
-            # crossover weights
-            maskW = rng.rand(*Wa.shape) < 0.5
-            Wc = np.where(maskW, Wb, Wa)
-            # crossover biases
-            maskb = rng.rand(*ba.shape) < 0.5
-            bc = np.where(maskb, bb, ba)
-            new_layers.append((Wc, bc))
-        c.layers = new_layers
-        return c
-
-    # Fallback: legacy .params list
+    # ----- Generic params-based (MLP etc.) -----
     if hasattr(c, "params") and hasattr(p2, "params"):
         new_params = []
         for a, b in zip(c.params, p2.params):
-            mask = rng.rand(*a.shape) < 0.5
-            new_params.append(np.where(mask, b, a))
+            if a.shape != b.shape:
+                # shapes mismatch – just copy from p1 for this param
+                new_params.append(a)
+            else:
+                mask = rng.rand(*a.shape) < 0.5
+                new_params.append(np.where(mask, b, a))
         c.params = new_params
         return c
 
-    raise ValueError(f"Unknown policy type for crossover: {type(p1)}, {type(p2)}")
-
+    # fallback: no crossover
+    return c
 
 # ----------------------------
 # Main GA

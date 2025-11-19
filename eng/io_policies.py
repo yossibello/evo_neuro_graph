@@ -1,59 +1,68 @@
+# eng/io_policies.py
+"""
+Helpers to load policies (linear / mlp / graph) from .npz files.
+Used by visualize_policy.py, eval_policy.py, etc.
+"""
+
+from __future__ import annotations
 import numpy as np
+
 from eng.policies import LinearPolicy
-from eng.policies_mlp import MLPPolicy
+try:
+    from eng.policies_mlp import MLPPolicy
+    HAS_MLP = True
+except Exception:
+    HAS_MLP = False
+
+try:
+    from eng.policies_graph import GraphPolicy
+    HAS_GRAPH = True
+except Exception:
+    HAS_GRAPH = False
 
 
 def load_policy_npz(path: str):
-    """
-    Load either linear or mlp policy from a .npz created by save_policy_npz()
-    or older formats with W1,b1,W2,b2,... but no W0.
-    """
-    data = np.load(path, allow_pickle=True)
-    files = set(data.files)
-    kind = None
+    d = np.load(path, allow_pickle=True)
+    keys = set(d.files)
 
-    if "kind" in files:
-        k = data["kind"]
+    kind = None
+    if "kind" in keys:
+        k = d["kind"]
         kind = k.item() if hasattr(k, "item") else str(k)
 
-    # ---- Linear: W, b ----
-    if kind == "linear" or {"W", "b"}.issubset(files):
-        W, b = data["W"], data["b"]
-        return LinearPolicy(W, b)
+    # -------- Linear ----------
+    if kind == "linear" or ({"W", "b"} <= keys):
+        W = d["W"]
+        b = d["b"]
+        return LinearPolicy(W=W, b=b)
 
-    # ---- MLP: W0/b0, W1/b1, ... or W1/b1,... only ----
-    if kind == "mlp" or any(name.startswith("W") for name in files):
-        # collect all W* indices that are of the form "W<number>"
-        idxs = []
-        for name in files:
-            if name.startswith("W"):
-                suffix = name[1:]
-                if suffix.isdigit():
-                    idxs.append(int(suffix))
+    # -------- MLP ----------
+    if kind == "mlp" or any(k.startswith("W0") for k in keys):
+        if not HAS_MLP:
+            raise ValueError("MLPPolicy not available but MLP npz was loaded.")
+        # Assume W0,b0,W1,b1,... in order
+        Ws = []
+        bs = []
+        i = 0
+        while f"W{i}" in keys:
+            Ws.append(d[f"W{i}"])
+            bi = d.get(f"b{i}", None)
+            if bi is None:
+                raise ValueError(f"Missing b{i} for MLP in {path}")
+            bs.append(bi)
+            i += 1
+        params = []
+        for W, b in zip(Ws, bs):
+            params.append(W)
+            params.append(b)
+        return MLPPolicy(params=params)
 
-        if not idxs:
-            raise ValueError(f"No MLP layers found in {path} (no W<i> keys).")
+    # -------- GraphPolicy ----------
+    if (kind == "graph") or ("graph_params" in keys):
+        if not HAS_GRAPH:
+            raise ValueError("GraphPolicy not available but graph npz was loaded.")
+        gp = d["graph_params"]
+        nr = int(d.get("num_registers", 48))
+        return GraphPolicy(num_registers=nr, node_params=gp)
 
-        idxs = sorted(idxs)  # e.g. [1,2,3] or [0,1,2]
-
-        layers = []
-        for i in idxs:
-            Wi = data[f"W{i}"]
-            bi_name = f"b{i}"
-            if bi_name in data.files:
-                bi = data[bi_name]
-            else:
-                # fallback if bias missing
-                bi = np.zeros((Wi.shape[0],), dtype=Wi.dtype)
-            layers.append((Wi, bi))
-
-        return MLPPolicy(layers=layers)
-
-    # ---- Heuristic fallback: raw arrays with shapes ----
-    if {"W", "b"}.intersection(files):
-        W = data.get("W", None)
-        b = data.get("b", None)
-        if W is not None and b is not None and W.ndim == 2 and b.ndim == 1:
-            return LinearPolicy(W, b)
-
-    raise ValueError(f"Unrecognized policy format in {path}; keys={sorted(files)}")
+    raise ValueError(f"Unrecognized policy format in {path}: keys={keys}, kind={kind}")

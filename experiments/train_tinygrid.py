@@ -30,9 +30,34 @@ from eng.evolve import save_policy_npz      # we defined this earlier
 
 
 def save_policy(policy, path_npz):
-    """Save policy (linear or MLP) using the same logic as training/checkpoints."""
+    """Save policy weights (supports linear, MLP, graph)."""
     os.makedirs(os.path.dirname(path_npz), exist_ok=True)
-    save_policy_npz(policy, path_npz)
+
+    # If policy exposes as_dict(), use that.
+    if hasattr(policy, "as_dict"):
+        np.savez_compressed(path_npz, **policy.as_dict())
+        return
+
+    # Linear fallback
+    if hasattr(policy, "W") and hasattr(policy, "b"):
+        np.savez_compressed(path_npz, W=policy.W, b=policy.b, kind="linear")
+        return
+
+    # Generic params list (e.g. some MLP variants)
+    if hasattr(policy, "params"):
+        params = {}
+        for i in range(0, len(policy.params), 2):
+            W = policy.params[i]
+            b = policy.params[i + 1] if (i + 1) < len(policy.params) else None
+            layer_idx = i // 2
+            params[f"W{layer_idx}"] = W
+            if b is not None:
+                params[f"b{layer_idx}"] = b
+        params["kind"] = "mlp"
+        np.savez_compressed(path_npz, **params)
+        return
+
+    raise ValueError(f"Don't know how to save policy of type: {type(policy)}")
 
 def main():
     ap = argparse.ArgumentParser(description="Train an evolutionary TinyGrid agent.")
@@ -44,7 +69,11 @@ def main():
     ap.add_argument("--sigma_decay", type=float, default=0.98)
     ap.add_argument("--crossover_rate", type=float, default=0.35)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--policy", type=str, default="linear", choices=["linear", "mlp"])
+    ap.add_argument(
+    "--policy",
+    type=str,
+    default="linear",
+    choices=["linear", "mlp", "graph"],)
     ap.add_argument("--generations", type=int, default=200)
     ap.add_argument("--outdir", type=str, default="artifacts")
     ap.add_argument("--mutation_sigma_floor", type=float, default=0.06)

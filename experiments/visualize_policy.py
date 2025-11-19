@@ -32,45 +32,38 @@ def render_ascii(env: TinyGrid):
         lines.append("".join(row))
     print("\n".join(lines))
 
-
 def run_episode(policy_path: str, seed: int, max_steps: int, render: str, pause: float):
-    # 1) Load policy via unified loader (handles linear + mlp)
+    from eng.io_policies import load_policy_npz
+    from tasks.tinygrid import TinyGrid
+    import time
+
+    # Load ANY policy (linear / mlp / graph)
     policy = load_policy_npz(policy_path)
 
-    # 2) Create env
     env = TinyGrid(max_steps=max_steps)
     obs = env.reset(seed=seed)
-    total = 0.0
 
-    for t in range(max_steps):
-        # 3) Get logits and pick greedy action
-        logits = policy(obs)          # shape (5,)
-        action = int(np.argmax(logits))
+    total_reward = 0.0
 
-        # 4) Step env
-        obs, reward, done, _info = env.step(action)
-        total += reward
+    for step in range(max_steps):
+        action = policy.act(obs)   # <-- generic; linear/mlp/graph all define .act()
+        obs, reward, done, info = env.step(action)
+        total_reward += reward
 
-        # 5) Render if requested
         if render == "ascii":
-            print()
-            render_ascii(env)
-            hud_parts = [
-                f"t={env.t} has_key={env.has_key} used_key={env.used_key} "
-                f"orient={env.orientation}",
-                f"step={env.t} reward={reward:+.3f} total={total:+.3f}",
-            ]
-            if reward <= -0.49 and not env.used_key and env.agent == env.goal_pos:
-                hud_parts.append("[penalized: goal before door]")
-            print("  ".join(hud_parts))
-
-            if pause > 0.0:
-                time.sleep(pause)
+            env.render()
+            time.sleep(pause)
+        elif render == "none":
+            pass
+        else:
+            raise ValueError("render must be 'ascii' or 'none'")
 
         if done:
             break
 
-    print(f"Episode finished in {env.t} steps with total reward {total:+.3f}")
+    print(
+        f"Episode finished in {step+1} steps with total reward {total_reward:+.3f}"
+    )
 
 
 def main():
