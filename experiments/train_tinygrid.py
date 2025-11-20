@@ -21,7 +21,7 @@ from eng.policies_mlp import MLPPolicy
 # Allow imports when running as module
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from eng.evolve import GAConfig, run_ga
+from eng.evolve import GAConfig, run_ga, save_policy_npz
 from tasks.tinygrid import TinyGrid
 
 
@@ -29,35 +29,37 @@ from eng.io_policies import load_policy_npz  # already used in evolve
 from eng.evolve import save_policy_npz      # we defined this earlier
 
 
-def save_policy(policy, path_npz):
-    """Save policy weights (supports linear, MLP, graph)."""
-    os.makedirs(os.path.dirname(path_npz), exist_ok=True)
 
-    # If policy exposes as_dict(), use that.
-    if hasattr(policy, "as_dict"):
-        np.savez_compressed(path_npz, **policy.as_dict())
-        return
 
-    # Linear fallback
-    if hasattr(policy, "W") and hasattr(policy, "b"):
-        np.savez_compressed(path_npz, W=policy.W, b=policy.b, kind="linear")
-        return
+# def save_policy(policy, path_npz):
+#     """Save policy weights (supports linear, MLP, graph)."""
+#     os.makedirs(os.path.dirname(path_npz), exist_ok=True)
 
-    # Generic params list (e.g. some MLP variants)
-    if hasattr(policy, "params"):
-        params = {}
-        for i in range(0, len(policy.params), 2):
-            W = policy.params[i]
-            b = policy.params[i + 1] if (i + 1) < len(policy.params) else None
-            layer_idx = i // 2
-            params[f"W{layer_idx}"] = W
-            if b is not None:
-                params[f"b{layer_idx}"] = b
-        params["kind"] = "mlp"
-        np.savez_compressed(path_npz, **params)
-        return
+#     # If policy exposes as_dict(), use that.
+#     if hasattr(policy, "as_dict"):
+#         np.savez_compressed(path_npz, **policy.as_dict())
+#         return
 
-    raise ValueError(f"Don't know how to save policy of type: {type(policy)}")
+#     # Linear fallback
+#     if hasattr(policy, "W") and hasattr(policy, "b"):
+#         np.savez_compressed(path_npz, W=policy.W, b=policy.b, kind="linear")
+#         return
+
+#     # Generic params list (e.g. some MLP variants)
+#     if hasattr(policy, "params"):
+#         params = {}
+#         for i in range(0, len(policy.params), 2):
+#             W = policy.params[i]
+#             b = policy.params[i + 1] if (i + 1) < len(policy.params) else None
+#             layer_idx = i // 2
+#             params[f"W{layer_idx}"] = W
+#             if b is not None:
+#                 params[f"b{layer_idx}"] = b
+#         params["kind"] = "mlp"
+#         np.savez_compressed(path_npz, **params)
+#         return
+
+#     raise ValueError(f"Don't know how to save policy of type: {type(policy)}")
 
 def main():
     ap = argparse.ArgumentParser(description="Train an evolutionary TinyGrid agent.")
@@ -115,7 +117,7 @@ def main():
     # Save results
     os.makedirs(args.outdir, exist_ok=True)
     policy_path = os.path.join(args.outdir, f"best_{args.policy}_policy.npz")
-    save_policy(winner, policy_path)
+    save_policy_npz(winner, policy_path)
 
     hist_path = os.path.join(args.outdir, "history.json")
     with open(hist_path, "w") as f:

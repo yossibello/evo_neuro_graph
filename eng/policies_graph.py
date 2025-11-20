@@ -1,185 +1,194 @@
 # eng/policies_graph.py
-
-from __future__ import annotations
 import numpy as np
-from typing import List
-
 
 class GraphPolicy:
     """
-    Tiny 'neuron graph' / programmatic policy.
+    Tiny code-graph policy.
 
-    - num_registers: how many registers (memory cells) we have.
-    - node_params: (num_nodes, 8) array, where each row is:
-
-        [ src0_idx_raw, src1_idx_raw, gate_idx_raw, out_idx_raw,
-          w0, w1, bias, gate_th ]
-
-      At runtime we interpret:
-
-        src0 = int(abs(src0_idx_raw)) % num_registers
-        src1 = int(abs(src1_idx_raw)) % num_registers
-        gate = int(abs(gate_idx_raw)) % num_registers
-        out  = int(abs(out_idx_raw))  % num_registers
-
-        s = w0 * R[src0] + w1 * R[src1] + bias
-        if R[gate] > gate_th:
-            R[out] = tanh(s)
-
-    - After running all nodes, the last 5 registers are treated as
-      logits for the 5 TinyGrid actions.
+    - num_registers: total scalar registers R[0..num_registers-1]
+    - node_params: shape (N, 8):
+        [src0, src1, dst, op_id, w0, w1, bias, gate]
+    - last 5 registers are used as action logits: up, right, down, left, toggle
     """
-
-    def __init__(
-        self,
-        num_registers: int = 48,
-        num_nodes: int = 32,
-        node_params: np.ndarray | None = None,
-    ):
-        self.num_registers = int(num_registers)
-        self.params_per_node = 8
-
-        # bounds for structural evolution
-        self.min_nodes = 8
-        self.max_nodes = 64
-
-        if node_params is None:
-            num_nodes = int(num_nodes)
-            # small random init
-            self.node_params = (
-                np.random.randn(num_nodes, self.params_per_node).astype(np.float32) * 0.2
-            )
-        else:
-            node_params = np.asarray(node_params, dtype=np.float32)
-            assert node_params.ndim == 2
-            assert node_params.shape[1] == self.params_per_node
-            self.node_params = node_params
-
-        self._sync_params_list()
-
-    # ---------- basic properties ----------
-
-    @property
-    def num_nodes(self) -> int:
-        return self.node_params.shape[0]
 
     def _sync_params_list(self):
         """
-        GA mutate/crossover in eng/evolve.py expects .params to be a list of arrays.
-        For GraphPolicy, we just expose [node_params].
-        """
-        self.params: List[np.ndarray] = [self.node_params]
+        Keep a generic `.params` list in sync with the main node parameter
+        matrix `self.node_params`.
 
-    def clone(self) -> "GraphPolicy":
+        The GA code in evolve.py expects policy.params to be a list of arrays,
+        so for GraphPolicy we just expose [node_params].
+        """
+        self.params = [self.node_params]
+
+    def __init__(self,
+                 num_registers: int = 48,
+                 num_nodes: int = 32,
+                 node_params: np.ndarray | None = None):
+        self.num_registers = int(num_registers)
+
+        if node_params is None:
+            # Random initial graph
+            N = int(num_nodes)
+            # src0, src1, dst, op_id, w0, w1, bias, gate
+            node_params = np.zeros((N, 8), dtype=np.float32)
+
+            # Inputs can be from any register (we'll mostly use obs in R[0:obs_dim])
+            node_params[:, 0] = np.random.randint(-4, self.num_registers, size=N)   # src0
+            node_params[:, 1] = np.random.randint(-4, self.num_registers, size=N)   # src1
+            node_params[:, 2] = np.random.randint(-4, self.num_registers, size=N)   # dst
+            node_params[:, 3] = np.random.randint(0, 6, size=N)                     # op_id
+            node_params[:, 4] = np.random.randn(N).astype(np.float32)               # w0
+            node_params[:, 5] = np.random.randn(N).astype(np.float32)               # w1
+            node_params[:, 6] = np.random.randn(N).astype(np.float32)               # bias
+            node_params[:, 7] = np.random.randn(N).astype(np.float32)               # gate
+        else:
+            node_params = np.asarray(node_params, dtype=np.float32)
+
+        self.node_params = node_params
+        self.num_nodes = self.node_params.shape[0]
+
+        # registers (reused each call)
+        self.registers = np.zeros(self.num_registers, dtype=np.float32)
+
+         # last 5 registers = action logits
+        self.n_actions = 5
+        self.action_base = self.num_registers - self.n_actions
+
+        self._rebuild_cache()
+        self._sync_params_list()   # <- NEW
+        
+
+    # -----------------------
+    # Parameters API for GA
+    # -----------------------
+    @property
+    def params(self):
+        # GA expects a list of arrays
+        return [self.node_params]
+
+    @params.setter
+    def params(self, new_params):
+        # new_params is a list; first entry is node_params
+        self.node_params = np.asarray(new_params[0], dtype=np.float32)
+        self.num_nodes = self.node_params.shape[0]
+        self._rebuild_cache()
+
+    def clone(self):
         return GraphPolicy(
             num_registers=self.num_registers,
-            node_params=self.node_params.copy(),
+            node_params=self.node_params.copy()
         )
 
-    # ---------- forward / act ----------
+    def as_dict(self):
+        # for save_policy_npz
+        return {
+            "kind": "graph",
+            "graph_params": self.node_params,
+            "num_registers": self.num_registers,
+        }
 
+    # -----------------------
+    # Internal: unpack node params
+    # -----------------------
+    def _rebuild_cache(self):
+        p = self.node_params
+        self.src0 = p[:, 0].astype(np.int32)
+        self.src1 = p[:, 1].astype(np.int32)
+        self.dst  = p[:, 2].astype(np.int32)
+        self.op   = p[:, 3].astype(np.int32)
+        self.w0   = p[:, 4]
+        self.w1   = p[:, 5]
+        self.bias = p[:, 6]
+        self.gate = p[:, 7]
+
+    def _resolve_idx(self, idx: int) -> int:
+        """
+        Allow negative indices to refer to registers from the end.
+        E.g., -1 = last register, -2 = second last, etc.
+        """
+        if idx >= 0:
+            return idx
+        return self.num_registers + idx  # Python negative indexing style
+
+    def _apply_node(self, i: int, R: np.ndarray):
+        src0, src1, dst, op_id, w0, w1, bias, gate = self.node_params[i]
+
+        # --- Discretize & clamp indices ---
+        s0 = int(round(src0))
+        s1 = int(round(src1))
+        d  = int(round(dst))
+
+        # Allow negative indices as Python negatives (scratch / tail regs),
+        # but keep them within [-num_registers, num_registers-1].
+        max_idx = self.num_registers - 1
+        min_idx = -self.num_registers
+
+        if s0 > max_idx: s0 = max_idx
+        if s1 > max_idx: s1 = max_idx
+        if s0 < min_idx: s0 = min_idx
+        if s1 < min_idx: s1 = min_idx
+
+        # Very simple gate: if gate <= 0, skip this node
+        if gate <= 0.0:
+            return
+
+        # Safe reads from registers
+        x0 = R[s0]
+        x1 = R[s1]
+
+        # --- Primitive operations ---
+        if   op_id == 0:   # ADD
+            y = x0 + x1
+        elif op_id == 1:   # MUL
+            y = x0 * x1
+        elif op_id == 2:   # MIN
+            y = min(x0, x1)
+        elif op_id == 3:   # MAX
+            y = max(x0, x1)
+        elif op_id == 4:   # OP-1
+            y = np.tanh(w0 * x0 + w1 * x1 + bias)
+        elif op_id == 5:   # OP-2
+            y = np.tanh(w0 * x0 - w1 * x1 + bias)
+        else:
+            # fallback
+            y = x0
+
+        # --- Write-back: only if d is a valid non-negative register index ---
+        if 0 <= d < self.num_registers:
+            R[d] = y
+
+    # -----------------------
+    # Main forward
+    # -----------------------
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         """
-        Run the tiny program once.
-
-        obs: (61,) observation
-        returns: (5,) logits for TinyGrid actions
+        Forward pass: write obs into registers, run all nodes, return logits.
+        This is what evaluate_policy() expects when it does `policy(obs)`.
         """
+        R = self.registers
+        R[:] = 0.0  # reset all registers
+
         obs = np.asarray(obs, dtype=np.float32)
-        R = np.zeros((self.num_registers,), dtype=np.float32)
+        obs_dim = min(len(obs), self.action_base)  # keep output registers free
 
-        # Load observation into the first registers
-        n = min(self.num_registers, obs.shape[0])
-        R[:n] = obs[:n]
+        # 🔧 important: slice to avoid shape mismatch
+        R[:obs_dim] = obs[:obs_dim]
 
-        nr = self.num_registers
+        # apply all nodes in order
+        for i in range(self.num_nodes):
+            self._apply_node(i, R)
 
-        for k in range(self.num_nodes):
-            p = self.node_params[k]  # shape (8,)
-            (
-                src0_raw,
-                src1_raw,
-                gate_raw,
-                out_raw,
-                w0,
-                w1,
-                bias,
-                gate_th,
-            ) = p
+        # last 5 registers → action logits
+        logits = R[self.action_base:self.action_base + self.n_actions]
+        return logits.copy()
 
-            src0 = int(abs(src0_raw)) % nr
-            src1 = int(abs(src1_raw)) % nr
-            gate = int(abs(gate_raw)) % nr
-            out  = int(abs(out_raw))  % nr
 
-            s = w0 * R[src0] + w1 * R[src1] + bias
-            if R[gate] > gate_th:
-                R[out] = np.tanh(s)
 
-        if self.num_registers < 5:
-            raise ValueError("num_registers must be >= 5 for 5 actions.")
-        logits = R[-5:]  # last 5 registers
-        return logits
-
+    # -----------------------
+    # Action API (used by GA)
+    # -----------------------
     def act(self, obs: np.ndarray, explore: bool = False) -> int:
-        """
-        Greedy action (no exploration; GA creates exploration via mutation).
-        """
         logits = self(obs)
+        # pure greedy as with linear/mlp
         return int(np.argmax(logits))
-
-    # ---------- structural mutation ----------
-
-    def structural_mutate(
-        self,
-        rng: np.random.RandomState,
-        p_rewire: float = 0.3,
-        p_add: float = 0.1,
-        p_del: float = 0.1,
-        p_dup: float = 0.1,
-    ):
-        """
-        Structural mutations in addition to numeric ones:
-
-        - rewire: random change of one of the index fields
-        - add:    add a new random node
-        - del:    delete an existing node
-        - dup:    duplicate and slightly perturb a node
-        """
-        # Rewire
-        if rng.rand() < p_rewire and self.num_nodes > 0:
-            k = rng.randint(0, self.num_nodes)
-            node = self.node_params[k]
-            idx_field = rng.randint(0, 4)  # 0=src0,1=src1,2=gate,3=out
-            node[idx_field] = rng.randn() * 5.0  # big jump in index-space
-
-        # Add new node
-        if rng.rand() < p_add and self.num_nodes < self.max_nodes:
-            new_node = rng.randn(self.params_per_node).astype(np.float32) * 0.5
-            self.node_params = np.vstack([self.node_params, new_node[None, :]])
-
-        # Delete a node
-        if rng.rand() < p_del and self.num_nodes > self.min_nodes:
-            k = rng.randint(0, self.num_nodes)
-            self.node_params = np.delete(self.node_params, k, axis=0)
-
-        # Duplicate
-        if rng.rand() < p_dup and self.num_nodes < self.max_nodes and self.num_nodes > 0:
-            k = rng.randint(0, self.num_nodes)
-            clone = self.node_params[k].copy()
-            clone += rng.randn(self.params_per_node).astype(np.float32) * 0.1
-            self.node_params = np.vstack([self.node_params, clone[None, :]])
-
-        self._sync_params_list()
-
-    # ---------- saving ----------
-
-    def as_dict(self) -> dict:
-        """
-        For np.savez_compressed via eng.evolve.save_policy_npz.
-        """
-        return {
-            "graph_params": self.node_params,
-            "num_registers": np.array(self.num_registers, dtype=np.int32),
-            "kind": "graph",
-        }

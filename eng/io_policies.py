@@ -6,6 +6,7 @@ Used by visualize_policy.py, eval_policy.py, etc.
 
 from __future__ import annotations
 import numpy as np
+from eng.policies_graph import GraphPolicy
 
 from eng.policies import LinearPolicy
 try:

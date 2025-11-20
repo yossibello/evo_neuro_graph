@@ -58,142 +58,252 @@ class TinyGrid:
     def __init__(self, size: int = 7, max_steps: int = 128):
         self.size = size
         self.max_steps = max_steps
-        self.rng = random.Random(0)
-        self.reset()
 
+        # RNG for layout
+        import random
+        self.rng = random.Random(0)
+
+        # Stall / exploration tracking (set before reset)
+        self.visited = None      # allocated in reset()
+        self.last_pos = None
+        self.stall_steps = 0     # use this name everywhere
+
+        # Episode state will be fully initialized in reset()
+        self.has_key = False
+        self.used_key = False
+        self.orientation = 0
+
+        # Build first layout
+        self.reset()
     # --------------------------
     # Public API
     # --------------------------
+        # --------------------------
+    # ASCII render (for visualize_policy)
+    # --------------------------
+    def render(self):
+        """
+        Print an ASCII view of the grid:
+        . = empty
+        # = wall
+        k = key
+        D = door
+        G = goal
+        A = agent
+        """
+        # map tile IDs→ chars
+        char_map = {
+            TILE_EMPTY: ".",
+            TILE_WALL:  "#",
+            TILE_KEY:   "k",
+            TILE_DOOR:  "D",
+            TILE_GOAL:  "G",
+        }
+
+        lines = []
+        for r in range(self.size):
+            row_chars = []
+            for c in range(self.size):
+                if (r, c) == self.agent:
+                    row_chars.append("A")
+                else:
+                    t = int(self.grid[r, c])
+                    row_chars.append(char_map.get(t, "?"))
+            lines.append("".join(row_chars))
+
+        print("\n".join(lines))
+        print(
+            f"t={self.t} has_key={self.has_key} used_key={self.used_key} "
+            f"orient={self.orientation}"
+        )
+
     def reset(self, seed=None):
         if seed is not None:
             self.rng.seed(seed)
 
         while True:
-            # fresh state
-            self.t=0; self.has_key=False; self.used_key=False; self.orientation=0
-            self.grid = np.zeros((self.size,self.size), dtype=np.int32)
-            self.grid[0,:]=1; self.grid[-1,:]=1; self.grid[:,0]=1; self.grid[:,-1]=1
+            # fresh episode state
+            self.t = 0
+            self.has_key = False
+            self.used_key = False
+            self.orientation = 0
+
+            # build grid
+            self.grid = np.zeros((self.size, self.size), dtype=np.int32)
+            self.grid[0, :] = 1
+            self.grid[-1, :] = 1
+            self.grid[:, 0] = 1
+            self.grid[:, -1] = 1
 
             # a few inner walls (tune count; fewer = easier)
             for _ in range(5):
-                r = self.rng.randrange(1,self.size-1)
-                c = self.rng.randrange(1,self.size-1)
-                self.grid[r,c]=1
+                r = self.rng.randrange(1, self.size - 1)
+                c = self.rng.randrange(1, self.size - 1)
+                self.grid[r, c] = 1
 
             def place(tile_id):
                 while True:
-                    r = self.rng.randrange(1,self.size-1)
-                    c = self.rng.randrange(1,self.size-1)
-                    if self.grid[r,c]==0:
-                        self.grid[r,c]=tile_id
-                        return (r,c)
+                    rr = self.rng.randrange(1, self.size - 1)
+                    cc = self.rng.randrange(1, self.size - 1)
+                    if self.grid[rr, cc] == 0:
+                        self.grid[rr, cc] = tile_id
+                        return (rr, cc)
 
             self.key_pos  = place(TILE_KEY)
             self.door_pos = place(TILE_DOOR)
             self.goal_pos = place(TILE_GOAL)
+
             # agent
             while True:
-                r = self.rng.randrange(1,self.size-1); c = self.rng.randrange(1,self.size-1)
-                if self.grid[r,c]==0:
-                    self.agent=(r,c); break
+                ar = self.rng.randrange(1, self.size - 1)
+                ac = self.rng.randrange(1, self.size - 1)
+                if self.grid[ar, ac] == 0:
+                    self.agent = (ar, ac)
+                    break
 
             g = self.grid
+
             # A->key with door CLOSED
-            def pass_to_key(rr,cc):
-                t=g[rr,cc]; return t!=TILE_WALL and t!=TILE_DOOR
+            def pass_to_key(rr, cc):
+                t = g[rr, cc]
+                return t != TILE_WALL and t != TILE_DOOR
+
             ok1 = _bfs(g, self.agent, self.key_pos, pass_to_key)
 
             # key->door (door becomes target; walls block)
-            def pass_open(rr,cc):
-                t=g[rr,cc]; return t!=TILE_WALL
+            def pass_open(rr, cc):
+                t = g[rr, cc]
+                return t != TILE_WALL
+
             ok2 = _bfs(g, self.key_pos, self.door_pos, pass_open)
 
             # door->goal (after opening door; walls block)
             ok3 = _bfs(g, self.door_pos, self.goal_pos, pass_open)
 
             # forbid A->G path with door CLOSED (or agent will be tempted to skip)
-            def pass_block_door(rr,cc):
-                t=g[rr,cc]; return t!=TILE_WALL and t!=TILE_DOOR
+            def pass_block_door(rr, cc):
+                t = g[rr, cc]
+                return t != TILE_WALL and t != TILE_DOOR
+
             forbid_skip = _bfs(g, self.agent, self.goal_pos, pass_block_door)
 
             if ok1 and ok2 and ok3 and not forbid_skip:
                 break
-            # else resample
-
+            # else resample layout
         # auto-pickup if spawned on key (no reward at reset)
-        if self.agent == self.key_pos:
-            self.has_key = True; self.grid[self.key_pos]=TILE_EMPTY
+        if self.agent == self.key_pos and not self.has_key:
+            self.has_key = True
+            self.grid[self.key_pos] = TILE_EMPTY
+
+        # --------------------------
+        # Exploration / stall state
+        # --------------------------
+        H, W = self.grid.shape
+        if (self.visited is None) or (self.visited.shape != (H, W)):
+            self.visited = np.zeros((H, W), dtype=bool)
+        else:
+            self.visited[:, :] = False
+
+        r, c = self.agent
+        self.visited[r, c] = True
+
+        self.last_pos = self.agent
+        self.stall_steps = 0
+
         return self._encode_obs()
 
-
     def step(self, action: int):
-        reward = -0.01  # step penalty
+        reward = -0.01   # small step cost
         done = False
-
         r, c = self.agent
 
         # --------------------------
-        # Movement (open door on entry if carrying key)
+        # Movement
         # --------------------------
         if action in (0, 1, 2, 3):
             self.orientation = action
             dr, dc = [(-1, 0), (0, 1), (1, 0), (0, -1)][action]
             nr, nc = r + dr, c + dc
-            target = self.grid[nr, nc]
+            tile = self.grid[nr, nc]
 
-            if target == TILE_WALL:
-                pass  # blocked
-            elif target == TILE_DOOR:
+            if tile == TILE_WALL:
+                pass
+
+            elif tile == TILE_DOOR:
                 if self.has_key and not self.used_key:
-                    # Open the door and move through
                     self.used_key = True
-                    reward += 0.3
+                    reward += 2.0
                     self.grid[nr, nc] = TILE_EMPTY
                     self.agent = (nr, nc)
                 else:
-                    pass  # locked door blocks
+                    pass
+
             else:
-                # empty / key / goal — move is allowed
                 self.agent = (nr, nc)
 
-        elif action == 4:
-            # toggle/use — kept for compatibility; not needed with auto-pickup/door-open
-            # You can make this a no-op or add small behaviors later if desired.
-            pass
-
-        # near door (only after key)
-        if self.has_key and not self.used_key:
-            if abs(self.agent[0]-self.door_pos[0]) + abs(self.agent[1]-self.door_pos[1]) == 1:
-                reward += 0.02
-
-        # near goal (only after door)
-        if self.used_key:
-            if abs(self.agent[0]-self.goal_pos[0]) + abs(self.agent[1]-self.goal_pos[1]) == 1:
-                reward += 0.02
         # --------------------------
-        # Auto pick-up key (after movement)
+        # Small proximity bonuses
+        # --------------------------
+        if self.has_key and not self.used_key:
+            if abs(self.agent[0] - self.door_pos[0]) + abs(self.agent[1] - self.door_pos[1]) == 1:
+                reward += 0.02
+
+        if self.used_key:
+            if abs(self.agent[0] - self.goal_pos[0]) + abs(self.agent[1] - self.goal_pos[1]) == 1:
+                reward += 0.02
+
+        # --------------------------
+        # Key pickup
         # --------------------------
         if self.agent == self.key_pos and not self.has_key:
             self.has_key = True
-            reward += 0.3
-            self.grid[self.key_pos] = TILE_EMPTY  # remove key from map
+            reward += 1.0
+            self.grid[self.key_pos] = TILE_EMPTY
 
         # --------------------------
-        # Strict Goal Logic
+        # Goal logic
         # --------------------------
         if self.agent == self.goal_pos:
             if self.used_key:
-                reward += 1.0
-                done = True
+                reward += 10.0
             else:
-                reward -= 0.5  # tried to skip the sequence
+                reward -= 0.5
+            return self._encode_obs(), float(reward), True, {
+                "has_key": self.has_key,
+                "used_key": self.used_key
+            }
 
+        # --------------------------
+        # Exploration bonus
+        # --------------------------
+        rr, cc = self.agent
+        if not self.visited[rr, cc]:
+            self.visited[rr, cc] = True
+            reward += 0.01
+
+        # --------------------------
+        # Mild stall punishment
+        # --------------------------
+        if self.agent == self.last_pos:
+            self.stall_steps += 1
+        else:
+            self.stall_steps = 0
+            self.last_pos = self.agent
+
+        if self.stall_steps > 4:
+            reward -= 0.03
+
+        # --------------------------
         # Time limit
+        # --------------------------
         self.t += 1
-        if self.t >= self.max_steps:
-            done = True
-        info = {"has_key": self.has_key, "used_key": self.used_key}
-        return self._encode_obs(), float(reward), done, info
+        done = (self.t >= self.max_steps)
+
+        return self._encode_obs(), float(reward), done, {
+            "has_key": self.has_key,
+            "used_key": self.used_key
+        }
+
 
     # --------------------------
     # Encoding
