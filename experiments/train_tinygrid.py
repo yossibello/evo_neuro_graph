@@ -86,7 +86,14 @@ def main():
     type=int,
     default=None,
     help="Number of worker processes for GA evaluation (default: use all CPU cores)",
-)
+    )
+    ap.add_argument(
+    "--difficulty",
+    type=str,
+    default="medium",
+    choices=["easy", "medium", "hard"],
+    help="TinyGrid difficulty level"
+    )
     args = ap.parse_args()
 
     # Configure GA
@@ -110,7 +117,10 @@ def main():
     print(f"🧠 Starting GA with {n_procs} worker processes (system cores: {os.cpu_count()})...")
     winner, history = run_ga(
         env_ctor=TinyGrid,
-        env_kwargs={"max_steps": args.max_steps},
+        env_kwargs={
+        "max_steps": args.max_steps,
+        "difficulty": args.difficulty,  # <--- NEW
+        },
         cfg=cfg,
     )
 

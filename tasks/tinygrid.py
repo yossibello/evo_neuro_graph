@@ -6,6 +6,55 @@ import random
 # --- add near top of file ---
 from collections import deque
 
+import json
+import os
+from typing import Any, Dict
+
+DEFAULT_REWARD_CONFIG: Dict[str, Any] = {
+    "step_penalty": -0.01,
+
+    "reward_pick_key": 0.2,
+    "reward_open_door": 0.3,
+    "reward_reach_goal": 10.0,
+    "penalty_goal_without_door": -0.5,
+
+    "bonus_near_door": 0.02,
+    "bonus_near_goal": 0.02,
+
+    "bonus_new_tile": 0.01,
+
+    "stall_mild_steps": 4,
+    "stall_mild_penalty": -0.03,
+
+    "stall_hard_steps": 10,
+    "stall_hard_penalty": -1.3,
+}
+
+
+def load_reward_config(path: str | None) -> Dict[str, Any]:
+    """
+    Load reward config from JSON file if provided.
+    Missing keys fall back to DEFAULT_REWARD_CONFIG.
+    """
+    cfg = DEFAULT_REWARD_CONFIG.copy()
+    if path is None:
+        return cfg
+
+    if not os.path.exists(path):
+        print(f"[TinyGrid] Warning: reward config '{path}' not found, using defaults.")
+        return cfg
+
+    try:
+        with open(path, "r") as f:
+            user_cfg = json.load(f)
+        cfg.update(user_cfg)
+    except Exception as e:
+        print(f"[TinyGrid] Error loading reward config '{path}': {e}")
+        print("[TinyGrid] Falling back to defaults.")
+    return cfg
+
+
+
 def manhattan(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
 
 def _bfs_path_exists(grid, start, goal, passable):
@@ -55,25 +104,35 @@ class TinyGrid:
     Strict rule is ALWAYS ON here (no flag) per your request.
     """
 
-    def __init__(self, size: int = 7, max_steps: int = 128):
+
+    def __init__(
+        self,
+        size: int = 7,
+        max_steps: int = 128,
+        difficulty: str = "medium",
+    ):
         self.size = size
         self.max_steps = max_steps
+        self.difficulty = difficulty
 
-        # RNG for layout
-        import random
+        # Difficulty → number of inner walls
+        if self.difficulty == "easy":
+            self.num_walls = 2
+        elif self.difficulty == "hard":
+            self.num_walls = 8
+        else:  # "medium" / default
+            self.num_walls = 5
+
+        # Stall / exploration tracking
+        self.last_pos = None
+        self.stall_steps = 0
+
         self.rng = random.Random(0)
 
-        # Stall / exploration tracking (set before reset)
-        self.visited = None      # allocated in reset()
-        self.last_pos = None
-        self.stall_steps = 0     # use this name everywhere
+        # These will be created in reset()
+        self.grid = None
+        self.visited = None
 
-        # Episode state will be fully initialized in reset()
-        self.has_key = False
-        self.used_key = False
-        self.orientation = 0
-
-        # Build first layout
         self.reset()
     # --------------------------
     # Public API
@@ -130,16 +189,17 @@ class TinyGrid:
 
             # build grid
             self.grid = np.zeros((self.size, self.size), dtype=np.int32)
-            self.grid[0, :] = 1
+            self.grid[0, :]  = 1
             self.grid[-1, :] = 1
-            self.grid[:, 0] = 1
+            self.grid[:, 0]  = 1
             self.grid[:, -1] = 1
 
-            # a few inner walls (tune count; fewer = easier)
-            for _ in range(5):
+            # inner walls (use difficulty / num_walls if available)
+            num_walls = getattr(self, "num_walls", 5)
+            for _ in range(num_walls):
                 r = self.rng.randrange(1, self.size - 1)
                 c = self.rng.randrange(1, self.size - 1)
-                self.grid[r, c] = 1
+                self.grid[r, c] = TILE_WALL
 
             def place(tile_id):
                 while True:
@@ -180,7 +240,7 @@ class TinyGrid:
             # door->goal (after opening door; walls block)
             ok3 = _bfs(g, self.door_pos, self.goal_pos, pass_open)
 
-            # forbid A->G path with door CLOSED (or agent will be tempted to skip)
+            # forbid A->G path with door CLOSED
             def pass_block_door(rr, cc):
                 t = g[rr, cc]
                 return t != TILE_WALL and t != TILE_DOOR
@@ -189,17 +249,18 @@ class TinyGrid:
 
             if ok1 and ok2 and ok3 and not forbid_skip:
                 break
-            # else resample layout
+            # else: resample a new layout
+
         # auto-pickup if spawned on key (no reward at reset)
         if self.agent == self.key_pos and not self.has_key:
             self.has_key = True
             self.grid[self.key_pos] = TILE_EMPTY
 
-        # --------------------------
+        # --------------------------------
         # Exploration / stall state
-        # --------------------------
+        # --------------------------------
         H, W = self.grid.shape
-        if (self.visited is None) or (self.visited.shape != (H, W)):
+        if (not hasattr(self, "visited")) or (self.visited is None) or (self.visited.shape != (H, W)):
             self.visited = np.zeros((H, W), dtype=bool)
         else:
             self.visited[:, :] = False
@@ -211,19 +272,19 @@ class TinyGrid:
         self.stall_steps = 0
 
         return self._encode_obs()
-
     def step(self, action: int):
-        reward = -0.01   # small step cost
+        reward = -0.01   # base step penalty
         done = False
-        r, c = self.agent
 
-        # --------------------------
+        old_r, old_c = self.agent
+
+        # -----------------------------------
         # Movement
-        # --------------------------
+        # -----------------------------------
         if action in (0, 1, 2, 3):
             self.orientation = action
-            dr, dc = [(-1, 0), (0, 1), (1, 0), (0, -1)][action]
-            nr, nc = r + dr, c + dc
+            dr, dc = [(-1,0),(0,1),(1,0),(0,-1)][action]
+            nr, nc = old_r + dr, old_c + dc
             tile = self.grid[nr, nc]
 
             if tile == TILE_WALL:
@@ -232,70 +293,97 @@ class TinyGrid:
             elif tile == TILE_DOOR:
                 if self.has_key and not self.used_key:
                     self.used_key = True
-                    reward += 2.0
+                    reward += 1.0
                     self.grid[nr, nc] = TILE_EMPTY
                     self.agent = (nr, nc)
                 else:
                     pass
-
+            
             else:
                 self.agent = (nr, nc)
 
-        # --------------------------
-        # Small proximity bonuses
-        # --------------------------
+        # -----------------------------------
+        # Distance shaping
+        # -----------------------------------
+        new_r, new_c = self.agent
+
+        def dist(a,b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+        # Move toward key
+        if not self.has_key:
+            if dist((new_r,new_c), self.key_pos) < dist((old_r,old_c), self.key_pos):
+                reward += 0.03
+
+        # Move toward door
         if self.has_key and not self.used_key:
-            if abs(self.agent[0] - self.door_pos[0]) + abs(self.agent[1] - self.door_pos[1]) == 1:
+            if dist((new_r,new_c), self.door_pos) < dist((old_r,old_c), self.door_pos):
+                reward += 0.03
+
+        # Move toward goal
+        if self.used_key:
+            if dist((new_r,new_c), self.goal_pos) < dist((old_r,old_c), self.goal_pos):
+                reward += 0.03
+
+        # -----------------------------------
+        # Key pickup
+        # -----------------------------------
+        if self.agent == self.key_pos and not self.has_key:
+            self.has_key = True
+            reward += 0.5
+            self.grid[self.key_pos] = TILE_EMPTY
+
+        # -----------------------------------
+        # Door/Goal proximity bonuses
+        # -----------------------------------
+        if self.has_key and not self.used_key:
+            if dist(self.agent, self.door_pos) == 1:
                 reward += 0.02
 
         if self.used_key:
-            if abs(self.agent[0] - self.goal_pos[0]) + abs(self.agent[1] - self.goal_pos[1]) == 1:
+            if dist(self.agent, self.goal_pos) == 1:
                 reward += 0.02
 
-        # --------------------------
-        # Key pickup
-        # --------------------------
-        if self.agent == self.key_pos and not self.has_key:
-            self.has_key = True
-            reward += 1.0
-            self.grid[self.key_pos] = TILE_EMPTY
-
-        # --------------------------
+        # -----------------------------------
         # Goal logic
-        # --------------------------
+        # -----------------------------------
         if self.agent == self.goal_pos:
             if self.used_key:
                 reward += 10.0
             else:
-                reward -= 0.5
+                reward -= 5.0    # strong punishment
             return self._encode_obs(), float(reward), True, {
                 "has_key": self.has_key,
                 "used_key": self.used_key
             }
 
-        # --------------------------
-        # Exploration bonus
-        # --------------------------
-        rr, cc = self.agent
-        if not self.visited[rr, cc]:
-            self.visited[rr, cc] = True
+        # -----------------------------------
+        # Exploration reward
+        # -----------------------------------
+        if not self.visited[new_r, new_c]:
+            self.visited[new_r, new_c] = True
             reward += 0.01
 
-        # --------------------------
-        # Mild stall punishment
-        # --------------------------
+        # -----------------------------------
+        # Stall logic
+        # -----------------------------------
         if self.agent == self.last_pos:
             self.stall_steps += 1
         else:
             self.stall_steps = 0
             self.last_pos = self.agent
 
-        if self.stall_steps > 4:
-            reward -= 0.03
+        # Mild bounce penalty
+        if self.stall_steps > 3:
+            reward -= 0.05   # stronger
 
-        # --------------------------
+        # Hard reset bounce
+        if self.stall_steps >= 10:
+            reward -= 1.0
+            self.stall_steps = 0
+
+        # -----------------------------------
         # Time limit
-        # --------------------------
+        # -----------------------------------
         self.t += 1
         done = (self.t >= self.max_steps)
 
