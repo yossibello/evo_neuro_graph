@@ -7,13 +7,13 @@ from tasks.tinygrid import TinyGrid
 from eng.io_policies import load_policy_npz   # unified loader
 
 
-def run_episode(policy, seed: int, max_steps: int):
+def run_episode(policy, seed: int, max_steps: int, size: int = 7, difficulty: str = "medium"):
     """
     Run one episode of TinyGrid with a given policy and seed.
     Returns (total_reward, success_flag).
     Success = reached goal after using key/door in the proper order.
     """
-    env = TinyGrid(max_steps=max_steps)
+    env = TinyGrid(max_steps=max_steps, difficulty=difficulty)
     obs = env.reset(seed=seed)
     total = 0.0
     success = False
@@ -53,6 +53,19 @@ def main():
         default=300,
         help="Max steps per episode.",
     )
+    ap.add_argument(
+        "--difficulty",
+        type=str,
+        default="medium",
+        choices=["easy", "medium", "hard"],
+        help="TinyGrid difficulty level"
+    )
+    ap.add_argument(
+        "--size",
+        type=int,
+        default=7,
+        help="Grid size"
+    )
     args = ap.parse_args()
 
     # Load policy (handles linear & mlp)
@@ -64,7 +77,7 @@ def main():
     base_seed = 0
     for i in range(args.seeds):
         seed = base_seed + i
-        R, ok = run_episode(policy, seed, args.max_steps)
+        R, ok = run_episode(policy, seed, args.max_steps, args.size, difficulty=args.difficulty)
         rewards.append(R)
         if ok:
             successes += 1
