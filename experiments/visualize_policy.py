@@ -32,7 +32,7 @@ def render_ascii(env: TinyGrid):
         lines.append("".join(row))
     print("\n".join(lines))
 
-def run_episode(policy_path: str, seed: int, max_steps: int, render: str, pause: float):
+def run_episode(policy_path: str, seed: int, max_steps: int, size: int, difficulty: str, render: str, pause: float):
     from eng.io_policies import load_policy_npz
     from tasks.tinygrid import TinyGrid
     import time
@@ -40,7 +40,7 @@ def run_episode(policy_path: str, seed: int, max_steps: int, render: str, pause:
     # Load ANY policy (linear / mlp / graph)
     policy = load_policy_npz(policy_path)
 
-    env = TinyGrid(max_steps=max_steps)
+    env = TinyGrid(max_steps=max_steps, size=size, difficulty=difficulty)
     obs = env.reset(seed=seed)
 
     total_reward = 0.0
