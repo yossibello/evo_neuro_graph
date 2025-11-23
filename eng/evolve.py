@@ -137,7 +137,7 @@ def evaluate_policy(policy,
     success_rate = successes / max(1, episodes)
 
     # Fitness formula unchanged
-    fitness = avg_reward + success_rate * 1.2
+    fitness = avg_reward + success_rate * 10.0
     return fitness, avg_reward, success_rate
 
 
