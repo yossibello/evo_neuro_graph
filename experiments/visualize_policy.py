@@ -89,10 +89,22 @@ def main():
         default=0.1,
         help="Delay between frames (seconds) when rendering ascii",
     )
+    ap.add_argument(
+        "--difficulty",
+        type=str,
+        default="medium",
+        choices=["easy", "medium", "hard"],
+        help="TinyGrid difficulty level"
+    )
+    ap.add_argument(
+        "--size",
+        type=int,
+        default=7,
+        help="Grid size"
+    )
     args = ap.parse_args()
 
-    run_episode(args.policy, args.seed, args.max_steps, args.render, args.pause)
-
+    run_episode(args.policy, args.seed, args.max_steps, args.size, args.difficulty, args.render, args.pause)
 
 if __name__ == "__main__":
     main()
