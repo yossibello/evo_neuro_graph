@@ -97,32 +97,48 @@ def evaluate_policy(policy,
                     max_steps: int,
                     rng: np.random.RandomState) -> Tuple[float, float, float]:
     """
-    Greedy evaluation (no exploration) as requested.
+    Greedy evaluation (no exploration).
     Returns (fitness, avg_reward, success_rate).
+
+    SUCCESS DEFINITION (strict and correct):
+    - agent reaches goal tile
+    - AND has used the key (i.e., opened the door)
     """
-    total = 0.0
+    total_reward = 0.0
     successes = 0
+
     for _ in range(episodes):
         env = env_maker()
         obs = env.reset(seed=int(rng.randint(0, 2**31 - 1)))
-        done = False
-        steps = 0
+
         ep_reward = 0.0
-        while not done and steps < max_steps:
-            logits = policy(obs)          # works for LinearPolicy and MLPPolicy
+        success = False
+
+        for step in range(max_steps):
+            # deterministic / greedy action
+            logits = policy(obs)
             action = int(np.argmax(logits))
-            obs, reward, done, _ = env.step(action)
+
+            obs, reward, done, _info = env.step(action)
             ep_reward += reward
-            steps += 1
-        total += ep_reward
-        if ep_reward >= 1.0 - 1e-6:   # reached G at least once in episode
+
+            if done:
+                # STRICT SUCCESS:
+                # must have used_key = True AND be physically on the goal tile
+                if getattr(env, "used_key", False) and getattr(env, "agent", None) == getattr(env, "goal_pos", None):
+                    success = True
+                break
+
+        total_reward += ep_reward
+        if success:
             successes += 1
 
-    avg_reward = total / max(1, episodes)
+    avg_reward = total_reward / max(1, episodes)
     success_rate = successes / max(1, episodes)
+
+    # Fitness formula unchanged
     fitness = avg_reward + success_rate * 1.2
     return fitness, avg_reward, success_rate
-
 
 
 
