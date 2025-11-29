@@ -128,6 +128,7 @@ class TinyGrid:
         # Stall / exploration tracking
         self.last_pos = None
         self.stall_steps = 0
+        self.visit_counts = None 
 
         self.rng = random.Random(0)
 
@@ -262,13 +263,22 @@ class TinyGrid:
         # Exploration / stall state
         # --------------------------------
         H, W = self.grid.shape
+
+        # track which tiles have ever been seen (for +0.01 exploration bonus)
         if (not hasattr(self, "visited")) or (self.visited is None) or (self.visited.shape != (H, W)):
             self.visited = np.zeros((H, W), dtype=bool)
         else:
             self.visited[:, :] = False
 
+        # track how many times we've stepped on each tile (for loop penalty)
+        if (not hasattr(self, "visit_counts")) or (self.visit_counts is None) or (self.visit_counts.shape != (H, W)):
+            self.visit_counts = np.zeros((H, W), dtype=np.int32)
+        else:
+            self.visit_counts[:, :] = 0
+
         r, c = self.agent
         self.visited[r, c] = True
+        self.visit_counts[r, c] = 1
 
         self.last_pos = self.agent
         self.stall_steps = 0
@@ -358,15 +368,21 @@ class TinyGrid:
                 "used_key": self.used_key
             }
 
-        # -----------------------------------
-        # Exploration reward
-        # -----------------------------------
-        if not self.visited[new_r, new_c]:
-            self.visited[new_r, new_c] = True
+        # --------------------------
+        # Exploration bonus
+        # --------------------------
+        rr, cc = self.agent
+        if not self.visited[rr, cc]:
+            self.visited[rr, cc] = True
             reward += 0.01
 
+        # Count visits to this tile (penalize loops like A-B-A-B-...)
+        self.visit_counts[rr, cc] += 1
+        if self.visit_counts[rr, cc] > 4:
+            reward -= 0.01   # small penalty for over-visiting same tile
+
         # -----------------------------------
-        # Stall logic
+        # Stall logic (camping on same tile)
         # -----------------------------------
         if self.agent == self.last_pos:
             self.stall_steps += 1
@@ -374,7 +390,7 @@ class TinyGrid:
             self.stall_steps = 0
             self.last_pos = self.agent
 
-        # Mild bounce penalty
+        # Mild bounce penalty (true stall, not A<->B)
         if self.stall_steps > 3:
             reward -= 0.05   # stronger
 
