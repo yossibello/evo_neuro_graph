@@ -238,18 +238,22 @@ def _eval_worker(args):
 # ----------------------------
 # Genetic operators
 # ----------------------------
+from eng.policies_graph import GraphPolicy
+import numpy as np
+
 def mutate(policy, sigma: float, rng: np.random.RandomState):
     """
     Clone the policy and add Gaussian noise to its parameters.
     Supports:
+      - GraphPolicy (node_params with index re-quantization)
       - LinearPolicy (W, b)
-      - GraphPolicy (node_params)
-      - MLP-style (.params list of arrays)
+      - Generic MLP-style policies exposing `.params` list of arrays.
     """
     child = policy.clone()
 
+    # ----- GraphPolicy -----
     if isinstance(child, GraphPolicy):
-        # numeric mutation
+        # numeric mutation on node_params
         node_params = child.node_params.copy()
         node_params += rng.normal(0.0, sigma, size=node_params.shape).astype(node_params.dtype)
 
@@ -262,9 +266,9 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
             ints = np.clip(ints, min_idx, max_idx)
             node_params[:, col] = ints
 
+        # assign back and rebuild cache
         child.node_params = node_params
         child._rebuild_cache()
-        child._sync_params_list()
         return child
 
     # ----- LinearPolicy -----
@@ -277,10 +281,11 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
     if hasattr(child, "params"):
         new_params = []
         for p in child.params:
+            p = np.asarray(p, dtype=np.float32)
             new_params.append(
                 p + rng.normal(0.0, sigma, size=p.shape).astype(p.dtype)
             )
-        child.params = new_params
+        child.params = new_params  # policy's setter should rebuild any caches
         return child
 
     raise ValueError(
@@ -288,81 +293,83 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
         "(no node_params, no (W,b), no params)"
     )
 
+import numpy as np
+from eng.policies_graph import GraphPolicy
+
+
 def crossover(p1, p2, rate: float, rng: np.random.RandomState):
     """
     Crossover between two policies.
 
-    - For LinearPolicy: per-weight uniform crossover on W, b.
-    - For generic MLP-like with .params: elementwise uniform crossover.
-    - For GraphPolicy: row-wise crossover on overlapping part of node_params,
-      allowing different numbers of nodes in each parent.
+    - GraphPolicy: elementwise uniform crossover on node_params.
+    - LinearPolicy: per-weight uniform crossover on W, b.
+    - Generic MLP-like with .params: elementwise uniform crossover.
     """
-    c = p1.clone()
+    # Start from a clone of parent1
+    child = p1.clone()
+
+    # If crossover is skipped by rate, just return the clone
     if rng.rand() >= rate:
-        return c
+        return child
 
-    # ----- GraphPolicy: variable-length node_params -----
-    from eng.policies_graph import GraphPolicy  # local import to avoid circular issues
+    # --------------------------------------------------------
+    # 1) GraphPolicy
+    # --------------------------------------------------------
+    if isinstance(child, GraphPolicy) and isinstance(p2, GraphPolicy):
+        A = child.node_params      # (Na, D)
+        B = p2.node_params         # (Nb, D)
 
-    if isinstance(c, GraphPolicy) and hasattr(p2, "node_params"):
-        A = c.node_params          # (Na, 8)
-        B = p2.node_params         # (Nb, 8)
-        Na, D = A.shape
-        Nb, Db = B.shape
-        assert D == Db == 8
+        if A.shape != B.shape:
+            # Easiest is to require same shape for now:
+            # if shapes differ, just keep parent1's params
+            return child
 
-        # Overlap region
-        n = min(Na, Nb)
-        if n > 0:
-            mask = rng.rand(n, D) < 0.5
-            A_new = A.copy()
-            # mix rows 0..n-1
-            A_new[:n] = np.where(mask, B[:n], A[:n])
-        else:
-            A_new = A.copy()
+        mask = rng.rand(*A.shape) < 0.5
+        child_params = np.where(mask, B, A).astype(A.dtype)
 
-        # Optionally, sometimes adopt extra nodes from the longer parent
-        # (this keeps structure diversity alive)
-        if Nb > Na and rng.rand() < 0.5:
-            extra = B[n:Nb].copy()
-            A_new = np.vstack([A_new, extra])
+        child.node_params = child_params
+        child._rebuild_cache()
+        return child
 
-        c.node_params = A_new
-        c._sync_params_list()
-        return c
+    # --------------------------------------------------------
+    # 2) LinearPolicy (W, b)
+    # --------------------------------------------------------
+    if hasattr(child, "W") and hasattr(child, "b") and \
+       hasattr(p2, "W") and hasattr(p2, "b"):
 
-    # ----- LinearPolicy: has W, b -----
-    if hasattr(c, "W") and hasattr(c, "b") and hasattr(p2, "W") and hasattr(p2, "b"):
-        maskW = rng.rand(*c.W.shape) < 0.5
-        c.W[maskW] = p2.W[maskW]
-        maskb = rng.rand(*c.b.shape) < 0.5
-        c.b[maskb] = p2.b[maskb]
-        return c
-    
-    # ----- GraphPolicy -----
-    if hasattr(c, "node_params"):
-        # Assumes p1.node_params and p2.node_params same shape
-        mask = rng.rand(*c.node_params.shape) < 0.5
-        c.node_params = np.where(mask, p2.node_params, c.node_params)
-        c._rebuild_cache()
-        return c
+        if child.W.shape != p2.W.shape or child.b.shape != p2.b.shape:
+            # shape mismatch → do nothing
+            return child
 
-    # ----- Generic params-based (MLP etc.) -----
-    if hasattr(c, "params") and hasattr(p2, "params"):
+        maskW = rng.rand(*child.W.shape) < 0.5
+        child.W = np.where(maskW, p2.W, child.W)
+
+        maskb = rng.rand(*child.b.shape) < 0.5
+        child.b = np.where(maskb, p2.b, child.b)
+        return child
+
+    # --------------------------------------------------------
+    # 3) Generic params-based (MLP etc.)
+    # --------------------------------------------------------
+    if hasattr(child, "params") and hasattr(p2, "params"):
         new_params = []
-        for a, b in zip(c.params, p2.params):
+        for a, b in zip(child.params, p2.params):
+            a = np.asarray(a)
+            b = np.asarray(b)
             if a.shape != b.shape:
-                # shapes mismatch – just copy from p1 for this param
+                # mismatch -> keep a
                 new_params.append(a)
             else:
                 mask = rng.rand(*a.shape) < 0.5
                 new_params.append(np.where(mask, b, a))
-        c.params = new_params
-        return c
 
-    # fallback: no crossover
-    return c
+        child.params = new_params
+        return child
 
+    # --------------------------------------------------------
+    # 4) Fallback: unknown policy type → no crossover
+    # --------------------------------------------------------
+    return child
 # ----------------------------
 # Main GA
 # ----------------------------

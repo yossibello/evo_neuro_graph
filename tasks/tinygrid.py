@@ -183,7 +183,18 @@ class TinyGrid:
         if seed is not None:
             self.rng.seed(seed)
 
+        max_tries = 10_000
+        tries = 0
+
         while True:
+            tries += 1
+            if tries > max_tries:
+                raise RuntimeError(
+                    f"TinyGrid.reset: failed to sample valid layout after "
+                    f"{max_tries} attempts (difficulty={getattr(self, 'difficulty', 'unknown')}, "
+                    f"size={self.size})"
+                )
+
             # fresh episode state
             self.t = 0
             self.has_key = False
@@ -250,9 +261,20 @@ class TinyGrid:
 
             forbid_skip = _bfs(g, self.agent, self.goal_pos, pass_block_door)
 
-            if ok1 and ok2 and ok3 and not forbid_skip:
-                break
-            # else: resample a new layout
+            # -------------------------------
+            # Difficulty-aware acceptance
+            # -------------------------------
+            if ok1 and ok2 and ok3:
+                diff = getattr(self, "difficulty", "medium")
+                if diff == "easy":
+                    # On easy: allow layouts even if agent *could* reach goal
+                    # without going through door first.
+                    break
+                else:
+                    # On medium / hard: require door to be a true chokepoint.
+                    if not forbid_skip:
+                        break
+            # else: resample layout
 
         # auto-pickup if spawned on key (no reward at reset)
         if self.agent == self.key_pos and not self.has_key:
@@ -284,6 +306,8 @@ class TinyGrid:
         self.stall_steps = 0
 
         return self._encode_obs()
+
+
     def step(self, action: int):
         reward = -0.01   # base step penalty
         done = False
