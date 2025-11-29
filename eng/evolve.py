@@ -19,6 +19,14 @@ except Exception:
 import numpy as np
 import copy
 
+def select_action(policy, obs):
+    """
+    Greedy action selection for any policy that returns logits.
+    Works for LinearPolicy, MLPPolicy, GraphPolicy, etc.
+    """
+    logits = policy(obs)              # policy must be callable
+    return int(np.argmax(logits))
+
 def mutate_inplace(policy, sigma: float):
     """
     Apply Gaussian noise to all weights and biases of a policy in-place.
@@ -118,7 +126,7 @@ def evaluate_policy(policy,
         steps = 0
 
         while not done and steps < max_steps:
-            action = select_action(obs)
+            action = select_action(policy,obs)
             obs, reward, done, _info = env.step(action)
             ep_reward += reward
             steps += 1
