@@ -143,6 +143,7 @@ def evaluate_policy(policy,
         # Strict success: used key AND ended on goal tile
         if getattr(env, "used_key", False) and getattr(env, "agent", None) == getattr(env, "goal_pos", None):
             successes += 1
+            print("[DEBUG] SUCCESS episode: reward=", ep_reward)
 
     # -------------
     # Aggregates
