@@ -98,12 +98,24 @@ def evaluate_policy(policy,
                     rng: np.random.RandomState) -> Tuple[float, float, float]:
     """
     Greedy evaluation (no exploration).
+
     Returns (fitness, avg_reward, success_rate).
 
-    SUCCESS DEFINITION (strict and correct):
-    - agent reaches goal tile
-    - AND has used the key (i.e., opened the door)
+    - If the policy has an .act(obs) method (GraphPolicy, etc.), we use that.
+    - Otherwise we fall back to calling it as a function and argmax'ing logits.
     """
+
+    # ---------- action selector (supports GraphPolicy and others) ----------
+    if hasattr(policy, "act") and callable(getattr(policy, "act")):
+        # GraphPolicy path (and any other with .act())
+        def select_action(obs: np.ndarray) -> int:
+            return int(policy.act(obs))
+    else:
+        # Old linear / MLP policies that are directly callable
+        def select_action(obs: np.ndarray) -> int:
+            logits = policy(obs)
+            return int(np.argmax(logits))
+
     total_reward = 0.0
     successes = 0
 
@@ -112,35 +124,27 @@ def evaluate_policy(policy,
         obs = env.reset(seed=int(rng.randint(0, 2**31 - 1)))
 
         ep_reward = 0.0
-        success = False
+        done = False
+        steps = 0
 
-        for step in range(max_steps):
-            # deterministic / greedy action
-            logits = policy(obs)
-            action = int(np.argmax(logits))
-
+        while not done and steps < max_steps:
+            action = select_action(obs)
             obs, reward, done, _info = env.step(action)
             ep_reward += reward
-
-            if done:
-                # STRICT SUCCESS:
-                # must have used_key = True AND be physically on the goal tile
-                if getattr(env, "used_key", False) and getattr(env, "agent", None) == getattr(env, "goal_pos", None):
-                    success = True
-                break
+            steps += 1
 
         total_reward += ep_reward
-        if success:
+
+        # Strict success: used key AND ended on goal tile
+        if getattr(env, "used_key", False) and getattr(env, "agent", None) == getattr(env, "goal_pos", None):
             successes += 1
 
     avg_reward = total_reward / max(1, episodes)
     success_rate = successes / max(1, episodes)
 
-    # Fitness formula unchanged
-    fitness = avg_reward + success_rate * 10.0
+    # Fitness: reward + bonus for success rate
+    fitness = avg_reward + success_rate * 1.2
     return fitness, avg_reward, success_rate
-
-
 
 from eng.io_policies import load_policy_npz as _io_load_policy_npz
 

@@ -1,6 +1,7 @@
 # eng/policies_graph.py
 import numpy as np
 
+
 class GraphPolicy:
     """
     Tiny code-graph policy.
@@ -19,12 +20,14 @@ class GraphPolicy:
         The GA code in evolve.py expects policy.params to be a list of arrays,
         so for GraphPolicy we just expose [node_params].
         """
-        self.params = [self.node_params]
+        self._params = [self.node_params]
 
-    def __init__(self,
-                 num_registers: int = 48,
-                 num_nodes: int = 32,
-                 node_params: np.ndarray | None = None):
+    def __init__(
+        self,
+        num_registers: int = 72,
+        num_nodes: int = 32,
+        node_params: np.ndarray | None = None,
+    ):
         self.num_registers = int(num_registers)
 
         if node_params is None:
@@ -51,13 +54,12 @@ class GraphPolicy:
         # registers (reused each call)
         self.registers = np.zeros(self.num_registers, dtype=np.float32)
 
-         # last 5 registers = action logits
+        # last 5 registers = action logits
         self.n_actions = 5
         self.action_base = self.num_registers - self.n_actions
 
         self._rebuild_cache()
-        self._sync_params_list()   # <- NEW
-        
+        self._sync_params_list()
 
     # -----------------------
     # Parameters API for GA
@@ -73,11 +75,12 @@ class GraphPolicy:
         self.node_params = np.asarray(new_params[0], dtype=np.float32)
         self.num_nodes = self.node_params.shape[0]
         self._rebuild_cache()
+        self._sync_params_list()
 
     def clone(self):
         return GraphPolicy(
             num_registers=self.num_registers,
-            node_params=self.node_params.copy()
+            node_params=self.node_params.copy(),
         )
 
     def as_dict(self):
@@ -159,36 +162,43 @@ class GraphPolicy:
             R[d] = y
 
     # -----------------------
-    # Main forward
+    # Forward / callable
     # -----------------------
+    def forward(self, obs: np.ndarray) -> np.ndarray:
+        """
+        Run the graph policy: copy input obs into registers,
+        apply all graph nodes, return logits for 5 actions.
+        """
+        obs = np.asarray(obs, dtype=np.float32)
+
+        # clear working registers
+        self.registers.fill(0.0)
+
+        obs_dim = obs.shape[0]
+        max_in = self.num_registers - self.n_actions
+
+        # Copy observation features into registers (truncate if ever needed)
+        n_in = min(obs_dim, max_in)
+        self.registers[:n_in] = obs[:n_in]
+
+        # Run all graph nodes
+        for i in range(self.num_nodes):
+            self._apply_node(i, self.registers)
+
+        # Output logits (last 5 registers)
+        logits = self.registers[self.action_base : self.action_base + self.n_actions]
+        return logits
+
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         """
-        Forward pass: write obs into registers, run all nodes, return logits.
-        This is what evaluate_policy() expects when it does `policy(obs)`.
+        Make policy instances directly callable: policy(obs) -> logits.
         """
-        R = self.registers
-        R[:] = 0.0  # reset all registers
-
-        obs = np.asarray(obs, dtype=np.float32)
-        obs_dim = min(len(obs), self.action_base)  # keep output registers free
-
-        # 🔧 important: slice to avoid shape mismatch
-        R[:obs_dim] = obs[:obs_dim]
-
-        # apply all nodes in order
-        for i in range(self.num_nodes):
-            self._apply_node(i, R)
-
-        # last 5 registers → action logits
-        logits = R[self.action_base:self.action_base + self.n_actions]
-        return logits.copy()
-
-
+        return self.forward(obs)
 
     # -----------------------
-    # Action API (used by GA)
+    # Action API (used by GA / eval)
     # -----------------------
     def act(self, obs: np.ndarray, explore: bool = False) -> int:
-        logits = self(obs)
-        # pure greedy as with linear/mlp
+        logits = self.forward(obs)
+        # pure greedy (no exploration) for now
         return int(np.argmax(logits))

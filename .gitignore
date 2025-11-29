@@ -3,3 +3,23 @@ env/
 venv/
 ENV/
 
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# NPZ policy / checkpoint files
+*.npz
+
+# Optional: artifacts folder
+artifacts/
+checkpoints/
+
+# Virtual envs
+env/
+venv/
+.venv/
+
+# OS junk
+.DS_Store

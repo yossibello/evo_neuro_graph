@@ -17,6 +17,7 @@ def run_episode(policy,
     Success = reached goal having used the key to open the door
               (env.used_key == True and env.agent == env.goal_pos).
     """
+    print(f"[DEBUG] eval: size={size}, difficulty={difficulty}")
     env = TinyGrid(size=size, max_steps=max_steps, difficulty=difficulty)
     obs = env.reset(seed=seed)
 
