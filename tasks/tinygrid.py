@@ -10,6 +10,8 @@ import json
 import os
 from typing import Any, Dict
 
+OBS_DIM = 61  # keep this in sync with _encode_obs()
+
 DEFAULT_REWARD_CONFIG: Dict[str, Any] = {
     "step_penalty": -0.01,
 
@@ -427,7 +429,8 @@ class TinyGrid:
             dtype=np.float32,
         )
 
-        obs = np.concatenate([patch_flat, inv, orient, step_budget])  # 54+2+4+1=61
+        obs = np.concatenate([patch_flat, inv, orient, step_budget]).astype(np.float32)
+        assert obs.shape[0] == OBS_DIM, f"Expected obs dim {OBS_DIM}, got {obs.shape[0]}"
         return obs
 
 
