@@ -119,7 +119,7 @@ class TinyGrid:
 
         # Difficulty → number of inner walls
         if self.difficulty == "easy":
-            self.num_walls = 2
+            self.num_walls = 0
         elif self.difficulty == "hard":
             self.num_walls = 8
         else:  # "medium" / default
