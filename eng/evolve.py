@@ -91,30 +91,35 @@ def make_policy(kind: str):
     raise ValueError(f"Unknown policy kind: {kind}")
 
 
+import numpy as np
+
 def evaluate_policy(policy,
-                    env_maker: Callable[[], Any],
+                    env_maker,
                     episodes: int,
                     max_steps: int,
-                    rng: np.random.RandomState) -> Tuple[float, float, float]:
+                    rng: np.random.RandomState):
     """
-    Greedy evaluation (no exploration).
+    Evaluate a policy greedily (no exploration).
 
-    Returns (fitness, avg_reward, success_rate).
+    Returns:
+        fitness, avg_reward, success_rate
 
-    - If the policy has an .act(obs) method (GraphPolicy, etc.), we use that.
-    - Otherwise we fall back to calling it as a function and argmax'ing logits.
+    Success definition (TinyGrid):
+    - Agent used key to open the door (env.used_key == True)
+    - Episode ended with agent on the goal tile (env.agent == env.goal_pos)
     """
 
-    # ---------- action selector (supports GraphPolicy and others) ----------
-    if hasattr(policy, "act") and callable(getattr(policy, "act")):
-        # GraphPolicy path (and any other with .act())
-        def select_action(obs: np.ndarray) -> int:
-            return int(policy.act(obs))
-    else:
-        # Old linear / MLP policies that are directly callable
-        def select_action(obs: np.ndarray) -> int:
-            logits = policy(obs)
-            return int(np.argmax(logits))
+    # -------------
+    # Action helper
+    # -------------
+    def select_action(obs):
+        # GraphPolicy / custom policies with .act(...)
+        if hasattr(policy, "act"):
+            return int(policy.act(obs, explore=False))
+
+        # LinearPolicy / MLPPolicy style: callable returning logits
+        logits = policy(obs)
+        return int(np.argmax(logits))
 
     total_reward = 0.0
     successes = 0
@@ -139,11 +144,17 @@ def evaluate_policy(policy,
         if getattr(env, "used_key", False) and getattr(env, "agent", None) == getattr(env, "goal_pos", None):
             successes += 1
 
-    avg_reward = total_reward / max(1, episodes)
-    success_rate = successes / max(1, episodes)
+    # -------------
+    # Aggregates
+    # -------------
+    episodes_safe = max(1, episodes)
+    avg_reward = total_reward / episodes_safe
+    success_rate = successes / episodes_safe
 
-    # Fitness: reward + bonus for success rate
-    fitness = avg_reward + success_rate * 1.2
+    # Make success *really* matter
+    SUCCESS_BONUS = 20.0   # tune if needed
+    fitness = avg_reward + SUCCESS_BONUS * success_rate
+
     return fitness, avg_reward, success_rate
 
 from eng.io_policies import load_policy_npz as _io_load_policy_npz
