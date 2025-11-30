@@ -119,6 +119,7 @@ def main():
         env_ctor=TinyGrid,
         env_kwargs={
         "max_steps": args.max_steps,
+        "size": args.size,  
         "difficulty": args.difficulty,  # <--- NEW
         },
         cfg=cfg,

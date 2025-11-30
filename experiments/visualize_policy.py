@@ -4,9 +4,10 @@ import argparse
 import time
 import numpy as np
 
-from eng.evolve import select_action
+
 from tasks.tinygrid import TinyGrid
 from eng.io_policies import load_policy_npz  # unified loader for linear + mlp
+
 
 
 def render_ascii(env: TinyGrid):
@@ -33,39 +34,45 @@ def render_ascii(env: TinyGrid):
         lines.append("".join(row))
     print("\n".join(lines))
 
-def run_episode(policy_path: str, seed: int, max_steps: int, size: int, difficulty: str, render: str, pause: float):
-    from eng.io_policies import load_policy_npz
-    from tasks.tinygrid import TinyGrid
-    import time
 
-    # Load ANY policy (linear / mlp / graph)
+
+
+def run_episode(policy_path,
+                seed: int,
+                max_steps: int,
+                size: int,
+                difficulty: str,
+                render: bool = True,
+                pause: float = 0.1):
+    # Load policy (linear / mlp / graph all supported)
     policy = load_policy_npz(policy_path)
 
-    env = TinyGrid(max_steps=max_steps, size=size, difficulty=difficulty)
+    env = TinyGrid(size=size, max_steps=max_steps, difficulty=difficulty)
     obs = env.reset(seed=seed)
-
     total_reward = 0.0
 
-    for step in range(max_steps):
-        action = select_action(policy, obs)   # <-- generic; linear/mlp/graph all define .act()
+    for t in range(max_steps):
+        if render:
+            env.render()
+            print(
+                f"t={t} has_key={env.has_key} used_key={env.used_key} "
+                f"orient={env.orientation}"
+            )
+            if pause > 0:
+                time.sleep(pause)
+
+        # ---- GREEDY ACTION (no select_action here) ----
+        logits = policy(obs)            # shape (5,)
+        action = int(np.argmax(logits)) # 0..4
+
         obs, reward, done, info = env.step(action)
         total_reward += reward
 
-        if render == "ascii":
-            env.render()
-            time.sleep(pause)
-        elif render == "none":
-            pass
-        else:
-            raise ValueError("render must be 'ascii' or 'none'")
-
         if done:
-            break
+            print(f"Episode finished in {t+1} steps with total reward {total_reward:+.3f}")
+            return
 
-    print(
-        f"Episode finished in {step+1} steps with total reward {total_reward:+.3f}"
-    )
-
+    print(f"Episode finished in {max_steps} steps with total reward {total_reward:+.3f}")
 
 def main():
     ap = argparse.ArgumentParser(description="Visualize TinyGrid policy behavior")
