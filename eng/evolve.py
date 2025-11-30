@@ -19,12 +19,11 @@ except Exception:
 import numpy as np
 import copy
 
-def select_action(policy, obs):
-    """
-    Greedy action selection for any policy that returns logits.
-    Works for LinearPolicy, MLPPolicy, GraphPolicy, etc.
-    """
-    logits = policy(obs)              # policy must be callable
+def select_action(policy, obs, rng: np.random.RandomState, eps: float = 0.05) -> int:
+    logits = policy(obs)
+    # occasional random action for exploration
+    if rng.rand() < eps:
+        return int(rng.randint(0, logits.shape[0]))
     return int(np.argmax(logits))
 
 def mutate_inplace(policy, sigma: float):
@@ -108,6 +107,7 @@ def evaluate_policy(policy,
                     rng: np.random.RandomState):
     """
     Returns (fitness, avg_reward, strict_success_rate).
+
     strict_success = used_key == True AND agent == goal_pos at end of episode.
     """
     total_reward = 0.0
@@ -126,7 +126,7 @@ def evaluate_policy(policy,
         steps = 0
 
         while not done and steps < max_steps:
-            action = select_action(policy,obs)
+            action = select_action(policy, obs, rng)   # ✅ make sure this is using the helper
             obs, reward, done, _info = env.step(action)
             ep_reward += reward
             steps += 1
@@ -155,21 +155,27 @@ def evaluate_policy(policy,
     key_rate     = key_episodes     / max(1, episodes)
     door_rate    = door_open_eps    / max(1, episodes)
 
-    # ---- Fitness shaping ----
-    # - avg_reward: general behavior
-    # - +0.2 * key_rate: encourage picking up key
-    # - +0.3 * door_rate: encourage opening door
-    # - +0.5 * goal_rate: encourage hitting goal at all
-    # - +1.0 * strict_sr: bonus for fully correct sequence
+    # ----------------------
+    # MUCH stronger shaping
+    # ----------------------
+    # Idea:
+    # - strict_sr dominates once it appears (full solution)
+    # - goal_rate is also a strong signal (even if key usage is wrong at first)
+    # - door_rate, key_rate help bootstrap learning toward the right sequence
+    #
     fitness = (
-        avg_reward
-        + 0.2 * key_rate
-        + 0.3 * door_rate
-        + 0.5 * goal_rate
-        + 1.0 * strict_sr
+        0.1 * avg_reward   # small weight; don't let tiny step costs dominate
+        + 0.5 * key_rate
+        + 1.0 * door_rate
+        + 3.0 * goal_rate
+        + 8.0 * strict_sr
     )
 
     return fitness, avg_reward, strict_sr
+
+
+
+
 from eng.io_policies import load_policy_npz as _io_load_policy_npz
 
 def _load_policy_npz(path, policy_kind: str):

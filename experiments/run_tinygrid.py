@@ -4,6 +4,8 @@ from statistics import mean
 import numpy as np
 from tqdm import trange
 
+from eng.evolve import select_action
+
 # local imports
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from eng.core import GA, Scheduler, Genome
@@ -32,8 +34,7 @@ def main():
     total = 0.0
     for t in range(args.max_steps):
         packets = encode_packets(obs, K=8)
-        logits = sched.run_tick(packets)  # returns 5 action scores
-        action = int(np.argmax(logits))
+        action = select_action(sched, packets)
         obs, reward, done, info = env.step(action)
         total += reward
 

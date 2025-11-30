@@ -4,6 +4,7 @@ import argparse
 import time
 import numpy as np
 
+from eng.evolve import select_action
 from tasks.tinygrid import TinyGrid
 from eng.io_policies import load_policy_npz  # unified loader for linear + mlp
 
@@ -46,7 +47,7 @@ def run_episode(policy_path: str, seed: int, max_steps: int, size: int, difficul
     total_reward = 0.0
 
     for step in range(max_steps):
-        action = policy.act(obs)   # <-- generic; linear/mlp/graph all define .act()
+        action = select_action(policy, obs)   # <-- generic; linear/mlp/graph all define .act()
         obs, reward, done, info = env.step(action)
         total_reward += reward
 

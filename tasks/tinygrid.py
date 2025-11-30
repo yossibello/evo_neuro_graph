@@ -329,11 +329,11 @@ class TinyGrid:
             elif tile == TILE_DOOR:
                 if self.has_key and not self.used_key:
                     self.used_key = True
-                    reward += 1.0
+                    reward += 2.0
                     self.grid[nr, nc] = TILE_EMPTY
                     self.agent = (nr, nc)
                 else:
-                    pass
+                    reward -= 0.2
             
             else:
                 self.agent = (nr, nc)
@@ -398,7 +398,7 @@ class TinyGrid:
         rr, cc = self.agent
         if not self.visited[rr, cc]:
             self.visited[rr, cc] = True
-            reward += 0.01
+            reward += 0.05
 
         # Count visits to this tile (penalize loops like A-B-A-B-...)
         self.visit_counts[rr, cc] += 1

@@ -18,7 +18,7 @@ def run_episode(policy,
               (env.used_key == True and env.agent == env.goal_pos).
     """
     print(f"[DEBUG] eval: size={size}, difficulty={difficulty}")
-    env = TinyGrid(size=size, max_steps=max_steps)
+    env = TinyGrid(size=size, max_steps=max_steps, difficulty=difficulty)
     obs = env.reset(seed=seed)
 
     total = 0.0
@@ -74,6 +74,7 @@ def main():
     args = ap.parse_args()
 
     policy = load_policy_npz(args.policy)
+    print("[DEBUG] loaded policy type:", type(policy))
 
     rewards = []
     successes = 0
