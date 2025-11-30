@@ -329,7 +329,7 @@ class TinyGrid:
             elif tile == TILE_DOOR:
                 if self.has_key and not self.used_key:
                     self.used_key = True
-                    reward += 2.0
+                    reward += 6.0
                     self.grid[nr, nc] = TILE_EMPTY
                     self.agent = (nr, nc)
                 else:
@@ -353,19 +353,19 @@ class TinyGrid:
         # Move toward door
         if self.has_key and not self.used_key:
             if dist((new_r,new_c), self.door_pos) < dist((old_r,old_c), self.door_pos):
-                reward += 0.03
+                reward += 0.1
 
         # Move toward goal
         if self.used_key:
             if dist((new_r,new_c), self.goal_pos) < dist((old_r,old_c), self.goal_pos):
-                reward += 0.03
+                reward += 0.1
 
         # -----------------------------------
         # Key pickup
         # -----------------------------------
         if self.agent == self.key_pos and not self.has_key:
             self.has_key = True
-            reward += 0.5
+            reward += 3
             self.grid[self.key_pos] = TILE_EMPTY
 
         # -----------------------------------
@@ -384,9 +384,9 @@ class TinyGrid:
         # -----------------------------------
         if self.agent == self.goal_pos:
             if self.used_key:
-                reward += 10.0
+                reward += 20.0
             else:
-                reward -= 5.0    # strong punishment
+                reward -= 0.5    # strong punishment
             return self._encode_obs(), float(reward), True, {
                 "has_key": self.has_key,
                 "used_key": self.used_key
