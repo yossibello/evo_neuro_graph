@@ -75,7 +75,7 @@ def mutate_inplace(policy, sigma: float):
 @dataclass
 class GAConfig:
     pop_size: int = 128
-    elites: int = 8
+    elites: int = 16
     episodes: int = 16
     max_steps: int = 200
     generations: int = 200
@@ -83,8 +83,16 @@ class GAConfig:
     # Evolution hyperparams
     mutation_sigma: float = 0.12
     sigma_decay: float = 0.98          # anneal mutation per generation
-    mutation_sigma_floor: float = 0.06   # ← ADD THIS
+    mutation_sigma_floor: float = 0.08
     crossover_rate: float = 0.35
+
+    # Anti-stagnation
+    stagnation_window: int = 15         # gens w/o improvement before sigma restart
+    sigma_restart_mult: float = 2.5     # multiply sigma on restart
+    fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
+
+    # Tournament selection
+    tournament_k: int = 4               # tournament size for parent selection
 
     # RNG
     seed: int = 0
@@ -502,6 +510,12 @@ def run_ga(
     sigma = cfg.mutation_sigma
     history: List[Dict[str, float]] = []
 
+    # ---- Stagnation tracking ----
+    best_ever_f = -float('inf')
+    gens_since_improvement = 0
+    hall_of_fame = []  # stores (fitness, policy) of all-time bests
+    HOF_SIZE = 5
+
     # Multiprocessing context (spawn works everywhere)
     ctx = mp.get_context("spawn")
     n_proc = cfg.processes or mp.cpu_count()
@@ -511,15 +525,22 @@ def run_ga(
     if not have_local_factory:
         pool = ctx.Pool(processes=n_proc)
 
+    def _tournament_select(pop_list, fit_arr, k, _rng):
+        """Tournament selection: pick k random individuals, return the best."""
+        idxs = _rng.randint(0, len(pop_list), size=k)
+        best_i = idxs[np.argmax(fit_arr[idxs])]
+        return pop_list[best_i]
+
     try:
         for gen in range(1, cfg.generations + 1):
             # ---- Parallel evaluation ----
+            # Use a shared seed batch so elites get re-evaluated on same seeds
+            # (reduces fitness noise between generations)
+            eval_seed_base = int(rng.randint(0, 2**31 - 1))
             jobs = []
             for i, pol in enumerate(pop):
-                seed_i = int(rng.randint(0, 2**31 - 1))
+                seed_i = (eval_seed_base + i * 7919) % (2**31)
                 if have_local_factory:
-                    # Fallback path: use single-process evaluation to avoid pickling lambda/env_factory
-                    # (We still batch this loop, so performance will be lower.)
                     f, r, s = evaluate_policy(pol, env_maker_local, cfg.episodes, cfg.max_steps, np.random.RandomState(seed_i))
                     fitness[i], avg_rewards[i], success_rates[i] = f, r, s
                 else:
@@ -535,26 +556,55 @@ def run_ga(
             order = np.argsort(fitness)[::-1]
             elites = [pop[i] for i in order[:cfg.elites]]
             best_idx = int(order[0])
+            gen_best_f = float(fitness[best_idx])
+
+            # ---- Hall of Fame tracking ----
+            if gen_best_f > best_ever_f:
+                best_ever_f = gen_best_f
+                gens_since_improvement = 0
+                # Add to hall of fame
+                hall_of_fame.append((gen_best_f, pop[best_idx].clone()))
+                hall_of_fame.sort(key=lambda x: x[0], reverse=True)
+                hall_of_fame = hall_of_fame[:HOF_SIZE]
+            else:
+                gens_since_improvement += 1
+
+            # ---- Stagnation detection & sigma restart ----
+            stag_tag = ""
+            if gens_since_improvement >= cfg.stagnation_window:
+                old_sigma = sigma
+                sigma = min(sigma * cfg.sigma_restart_mult, cfg.mutation_sigma)
+                gens_since_improvement = 0
+                stag_tag = f" | STAG_RESTART sigma {old_sigma:.4f}->{sigma:.4f}"
+
             stats = {
                 "gen": gen,
-                "best_f": float(fitness[best_idx]),
+                "best_f": gen_best_f,
                 "best_r": float(avg_rewards[best_idx]),
                 "best_s": float(success_rates[best_idx]),
                 "mean_f": float(fitness.mean()),
                 "mean_r": float(avg_rewards.mean()),
                 "mean_s": float(success_rates.mean()),
                 "sigma": float(sigma),
+                "best_ever_f": best_ever_f,
+                "stag_gens": gens_since_improvement,
             }
             history.append(stats)
+
+            # Top-quartile mean (more informative than full-pop mean)
+            q25 = max(1, cfg.pop_size // 4)
+            top_q_f = float(fitness[order[:q25]].mean())
+
             print(
                 f"Gen {gen:03d} | "
                 f"best_f {stats['best_f']:+.3f} (r {stats['best_r']:+.3f}, s {stats['best_s']:.2f}) | "
-                f"mean_f {stats['mean_f']:+.3f} (r {stats['mean_r']:+.3f}, s {stats['mean_s']:.2f}) | "
+                f"mean_f {stats['mean_f']:+.3f} top25%_f {top_q_f:+.3f} | "
+                f"best_ever {best_ever_f:+.3f} stag {gens_since_improvement} | "
                 f"sigma {stats['sigma']:.4f} | procs {n_proc}"
+                f"{stag_tag}"
             )
 
             # ---- Checkpoints every N generations ----
-            # You can hardcode N or later add a cfg.checkpoint_interval
             if gen % 20 == 0:
                 os.makedirs("artifacts/checkpoints", exist_ok=True)
                 K = 3  # save top-3
@@ -567,15 +617,29 @@ def run_ga(
 
 
             # ---- Reproduction ----
-            new_pop: List[Any] = elites.copy()
+            new_pop: List[Any] = [e.clone() for e in elites]  # deep-copy elites
+
+            # Inject hall-of-fame members (persistent memory of best-ever)
+            for _, hof_pol in hall_of_fame:
+                if len(new_pop) < cfg.pop_size:
+                    new_pop.append(hof_pol.clone())
+
+            # Inject fresh random individuals (diversity)
+            n_fresh = int(cfg.pop_size * cfg.fresh_inject_frac)
+            for _ in range(n_fresh):
+                if len(new_pop) < cfg.pop_size:
+                    new_pop.append(make_policy(cfg.policy, cfg))
+
+            # Fill rest via tournament selection + crossover + mutation
             while len(new_pop) < cfg.pop_size:
-                p1, p2 = rng.choice(elites), rng.choice(pop)
+                p1 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
+                p2 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
                 child = crossover(p1, p2, cfg.crossover_rate, rng)
                 child = mutate(child, sigma, rng)
                 new_pop.append(child)
             pop = new_pop
             sigma *= cfg.sigma_decay
-            sigma = max(sigma, cfg.mutation_sigma_floor)  # NEW
+            sigma = max(sigma, cfg.mutation_sigma_floor)
 
     finally:
         if pool is not None:
