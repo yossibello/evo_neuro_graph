@@ -603,9 +603,13 @@ def run_ga(
                 best_ever_f = gen_best_f
                 gens_since_improvement = 0
                 # Add to hall of fame
-                hall_of_fame.append((gen_best_f, pop[best_idx].clone()))
+                best_ever_policy = pop[best_idx].clone()
+                hall_of_fame.append((gen_best_f, best_ever_policy))
                 hall_of_fame.sort(key=lambda x: x[0], reverse=True)
                 hall_of_fame = hall_of_fame[:HOF_SIZE]
+                # Persist best_ever to disk immediately (never lose it)
+                os.makedirs("artifacts", exist_ok=True)
+                save_policy_npz(best_ever_policy, "artifacts/best_ever_policy.npz")
             else:
                 gens_since_improvement += 1
 
@@ -688,18 +692,9 @@ def run_ga(
             pool.close()
             pool.join()
 
-    # Final pick of winner (deterministic greedy eval)
-    # We evaluate single-process here for simplicity; you can parallelize similarly if desired.
-    final_fit = np.zeros(cfg.pop_size, dtype=np.float32)
-    for i, pol in enumerate(pop):
-        if have_local_factory:
-            f, _, _ = evaluate_policy(pol, env_maker_local, cfg.episodes * 2, cfg.max_steps, np.random.RandomState(cfg.seed + i + 123))
-        else:
-            # Make a local maker that uses env_ctor directly
-            def _m():
-                return env_ctor(**(env_kwargs or {}))
-            f, _, _ = evaluate_policy(pol, _m, cfg.episodes * 2, cfg.max_steps, np.random.RandomState(cfg.seed + i + 123))
-        final_fit[i] = f
-
-    winner = pop[int(np.argmax(final_fit))]
+    # Return best_ever from Hall of Fame (most reliable champion)
+    if hall_of_fame:
+        winner = hall_of_fame[0][1]  # HOF is sorted by fitness, [0] = best
+    else:
+        winner = pop[0]  # fallback: first elite
     return winner, history
