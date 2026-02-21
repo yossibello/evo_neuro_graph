@@ -88,15 +88,15 @@ class GAConfig:
 
     # Anti-stagnation
     stagnation_window: int = 15         # gens w/o improvement before sigma restart
-    sigma_restart_mult: float = 1.5     # multiply sigma on restart (gentle)
-    sigma_restart_cap: float = 0.80     # restart sigma capped at this fraction of initial
+    sigma_restart_mult: float = 2.0     # multiply sigma on restart
+    sigma_restart_cap: float = 1.0      # restart sigma capped at this fraction of initial
     fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
 
     # Tournament selection
     tournament_k: int = 4               # tournament size for parent selection
 
     # Elite re-evaluation (noise reduction)
-    reeval_factor: int = 3              # re-evaluate top candidates with N*episodes
+    reeval_factor: int = 1              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
 
     # RNG
     seed: int = 0
