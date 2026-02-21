@@ -88,11 +88,15 @@ class GAConfig:
 
     # Anti-stagnation
     stagnation_window: int = 15         # gens w/o improvement before sigma restart
-    sigma_restart_mult: float = 2.5     # multiply sigma on restart
+    sigma_restart_mult: float = 1.5     # multiply sigma on restart (gentle)
+    sigma_restart_cap: float = 0.80     # restart sigma capped at this fraction of initial
     fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
 
     # Tournament selection
     tournament_k: int = 4               # tournament size for parent selection
+
+    # Elite re-evaluation (noise reduction)
+    reeval_factor: int = 3              # re-evaluate top candidates with N*episodes
 
     # RNG
     seed: int = 0
@@ -303,9 +307,10 @@ def _eval_worker(args):
 from eng.policies_graph import GraphPolicy
 import numpy as np
 
-def mutate(policy, sigma: float, rng: np.random.RandomState):
+def mutate(policy, sigma: float, rng: np.random.RandomState, stag_pressure: float = 0.0):
     """
     Clone the policy and add Gaussian noise to its parameters.
+    stag_pressure in [0, 1]: when high, structural mutation rates increase.
     Supports:
       - GraphPolicy (node_params with index re-quantization)
       - LinearPolicy (W, b)
@@ -320,9 +325,10 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
         N = node_params.shape[0]
         nr = child.num_registers
 
-        # --- Structural mutations (discrete, rare) ---
-        p_rewire  = 0.10      # chance per node per index column to rewire
-        p_op_flip = 0.05      # chance per node to switch operation
+        # --- Structural mutations (adaptive to stagnation pressure) ---
+        sp = min(1.0, max(0.0, stag_pressure))
+        p_rewire  = 0.08 + 0.17 * sp    # 0.08 -> 0.25 as stagnation grows
+        p_op_flip = 0.04 + 0.11 * sp    # 0.04 -> 0.15 as stagnation grows
 
         for i in range(N):
             if rng.rand() < p_rewire:
@@ -547,10 +553,44 @@ def run_ga(
                     jobs.append((pol, cfg.episodes, cfg.max_steps, seed_i, env_ctor, env_kwargs or {}))
 
             if not have_local_factory:
-                with ctx.Pool(processes=n_proc) as pool:
-                    results = pool.map(_eval_worker, jobs)
+                results = pool.map(_eval_worker, jobs)
                 for i, (f, r, s) in enumerate(results):
                     fitness[i], avg_rewards[i], success_rates[i] = f, r, s
+
+            # ---- Elite re-evaluation (noise reduction) ----
+            # Re-evaluate top candidates with more episodes to get stable fitness
+            if cfg.reeval_factor > 1:
+                prelim_order = np.argsort(fitness)[::-1]
+                n_reeval = min(2 * cfg.elites, cfg.pop_size)
+                reeval_idxs = prelim_order[:n_reeval]
+                reeval_eps = cfg.episodes * (cfg.reeval_factor - 1)  # additional episodes
+
+                reeval_seed_base = int(rng.randint(0, 2**31 - 1))
+                if have_local_factory:
+                    for j, idx in enumerate(reeval_idxs):
+                        seed_re = (reeval_seed_base + j * 6271) % (2**31)
+                        f2, r2, s2 = evaluate_policy(
+                            pop[idx], env_maker_local, reeval_eps, cfg.max_steps,
+                            np.random.RandomState(seed_re),
+                        )
+                        w1, w2 = cfg.episodes, reeval_eps
+                        wt = w1 + w2
+                        fitness[idx] = (w1 * fitness[idx] + w2 * f2) / wt
+                        avg_rewards[idx] = (w1 * avg_rewards[idx] + w2 * r2) / wt
+                        success_rates[idx] = (w1 * success_rates[idx] + w2 * s2) / wt
+                else:
+                    reeval_jobs = []
+                    for j, idx in enumerate(reeval_idxs):
+                        seed_re = (reeval_seed_base + j * 6271) % (2**31)
+                        reeval_jobs.append((pop[idx], reeval_eps, cfg.max_steps, seed_re, env_ctor, env_kwargs or {}))
+                    reeval_results = pool.map(_eval_worker, reeval_jobs)
+                    for j, idx in enumerate(reeval_idxs):
+                        f2, r2, s2 = reeval_results[j]
+                        w1, w2 = cfg.episodes, reeval_eps
+                        wt = w1 + w2
+                        fitness[idx] = (w1 * fitness[idx] + w2 * f2) / wt
+                        avg_rewards[idx] = (w1 * avg_rewards[idx] + w2 * r2) / wt
+                        success_rates[idx] = (w1 * success_rates[idx] + w2 * s2) / wt
 
             # ---- Selection & logging ----
             order = np.argsort(fitness)[::-1]
@@ -571,9 +611,11 @@ def run_ga(
 
             # ---- Stagnation detection & sigma restart ----
             stag_tag = ""
+            stag_pressure = min(1.0, gens_since_improvement / max(1, cfg.stagnation_window))
             if gens_since_improvement >= cfg.stagnation_window:
                 old_sigma = sigma
-                sigma = min(sigma * cfg.sigma_restart_mult, cfg.mutation_sigma)
+                sigma_cap = cfg.mutation_sigma * cfg.sigma_restart_cap
+                sigma = min(sigma * cfg.sigma_restart_mult, sigma_cap)
                 gens_since_improvement = 0
                 stag_tag = f" | STAG_RESTART sigma {old_sigma:.4f}->{sigma:.4f}"
 
@@ -635,7 +677,7 @@ def run_ga(
                 p1 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
                 p2 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
                 child = crossover(p1, p2, cfg.crossover_rate, rng)
-                child = mutate(child, sigma, rng)
+                child = mutate(child, sigma, rng, stag_pressure=stag_pressure)
                 new_pop.append(child)
             pop = new_pop
             sigma *= cfg.sigma_decay
