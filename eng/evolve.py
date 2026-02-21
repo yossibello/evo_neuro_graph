@@ -29,9 +29,29 @@ def select_action(policy, obs, rng: np.random.RandomState, eps: float = 0.05) ->
 def mutate_inplace(policy, sigma: float):
     """
     Apply Gaussian noise to all weights and biases of a policy in-place.
-    Works for both LinearPolicy and MLPPolicy.
+    Works for LinearPolicy, MLPPolicy, and GraphPolicy.
     """
-    if hasattr(policy, "W"):  # linear
+    from eng.policies_graph import GraphPolicy, NUM_OPS
+
+    if isinstance(policy, GraphPolicy):
+        # Structural: discrete rewire + op flip
+        N = policy.node_params.shape[0]
+        nr = policy.num_registers
+        for i in range(N):
+            if np.random.rand() < 0.10:
+                policy.node_params[i, 0] = np.random.randint(0, nr)
+            if np.random.rand() < 0.10:
+                policy.node_params[i, 1] = np.random.randint(0, nr)
+            if np.random.rand() < 0.10:
+                policy.node_params[i, 2] = np.random.randint(0, nr)
+            if np.random.rand() < 0.05:
+                policy.node_params[i, 3] = np.random.randint(0, NUM_OPS)
+        # Parametric: continuous Gaussian on weights/gate only
+        for col in (4, 5, 6, 7):
+            policy.node_params[:, col] += np.random.randn(N) * sigma
+        policy._rebuild_cache()
+
+    elif hasattr(policy, "W"):  # linear
         policy.W += np.random.randn(*policy.W.shape) * sigma
         policy.b += np.random.randn(*policy.b.shape) * sigma
 
@@ -80,21 +100,36 @@ class GAConfig:
 
     init_policy: str | None = None
 
+    # Graph policy config
+    graph_nodes: int = 64
+    graph_ticks: int = 3
+    graph_registers: int = 96
+
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def make_policy(kind: str):
+def make_policy(kind: str, cfg: 'GAConfig | None' = None):
     if kind == "linear":
-        return LinearPolicy()
+        return LinearPolicy(
+            W=np.random.randn(5, 61).astype(np.float32) * 0.1,
+            b=np.zeros(5, dtype=np.float32),
+        )
     if kind == "mlp":
         if not HAS_MLP:
             raise ValueError("MLP requested but eng/policies_mlp.py not found.")
         from eng.policies_mlp import MLPPolicy
         return MLPPolicy()
-    if kind == "graph":  # NEW
-        return GraphPolicy()
+    if kind == "graph":
+        kw = {}
+        if cfg:
+            kw = dict(
+                num_registers=cfg.graph_registers,
+                num_nodes=cfg.graph_nodes,
+                num_ticks=cfg.graph_ticks,
+            )
+        return GraphPolicy(**kw)
     raise ValueError(f"Unknown policy kind: {kind}")
 
 
@@ -272,21 +307,30 @@ def mutate(policy, sigma: float, rng: np.random.RandomState):
 
     # ----- GraphPolicy -----
     if isinstance(child, GraphPolicy):
-        # numeric mutation on node_params
+        from eng.policies_graph import NUM_OPS
         node_params = child.node_params.copy()
-        node_params += rng.normal(0.0, sigma, size=node_params.shape).astype(node_params.dtype)
+        N = node_params.shape[0]
+        nr = child.num_registers
 
-        # re-quantize and clamp index columns: src0, src1, dst
-        max_idx = child.num_registers - 1
-        min_idx = -child.num_registers
+        # --- Structural mutations (discrete, rare) ---
+        p_rewire  = 0.10      # chance per node per index column to rewire
+        p_op_flip = 0.05      # chance per node to switch operation
 
-        for col in (0, 1, 2):  # src0, src1, dst
-            ints = np.round(node_params[:, col]).astype(np.int32)
-            ints = np.clip(ints, min_idx, max_idx)
-            node_params[:, col] = ints
+        for i in range(N):
+            if rng.rand() < p_rewire:
+                node_params[i, 0] = rng.randint(0, nr)    # rewire src0
+            if rng.rand() < p_rewire:
+                node_params[i, 1] = rng.randint(0, nr)    # rewire src1
+            if rng.rand() < p_rewire:
+                node_params[i, 2] = rng.randint(0, nr)    # rewire dst
+            if rng.rand() < p_op_flip:
+                node_params[i, 3] = rng.randint(0, NUM_OPS)  # change op
 
-        # assign back and rebuild cache
-        child.node_params = node_params
+        # --- Parametric mutations (continuous Gaussian on weights/gate only) ---
+        for col in (4, 5, 6, 7):   # w0, w1, bias, gate
+            node_params[:, col] += rng.normal(0.0, sigma, size=N).astype(np.float32)
+
+        child.node_params = node_params.astype(np.float32)
         child._rebuild_cache()
         return child
 
@@ -339,11 +383,11 @@ def crossover(p1, p2, rate: float, rng: np.random.RandomState):
         B = p2.node_params         # (Nb, D)
 
         if A.shape != B.shape:
-            # Easiest is to require same shape for now:
-            # if shapes differ, just keep parent1's params
             return child
 
-        mask = rng.rand(*A.shape) < 0.5
+        N = A.shape[0]
+        # Node-level crossover: swap entire nodes (preserves src/weight coupling)
+        mask = rng.rand(N, 1) < 0.5    # (N, 1) broadcasts to (N, D)
         child_params = np.where(mask, B, A).astype(A.dtype)
 
         child.node_params = child_params
@@ -449,7 +493,7 @@ def run_ga(
         )
         print(f"[DEBUG] init_policy fitness {f0:+.3f} (r {r0:+.3f}, s {s0:.2f})")
     else:
-        pop = [make_policy(cfg.policy) for _ in range(cfg.pop_size)]
+        pop = [make_policy(cfg.policy, cfg) for _ in range(cfg.pop_size)]
 
     fitness = np.zeros(cfg.pop_size, dtype=np.float32)
     avg_rewards = np.zeros(cfg.pop_size, dtype=np.float32)

@@ -42,18 +42,17 @@ IDX_GATE = 7
 def op_to_name(op_code: int) -> str:
     """
     Human-readable name for op codes.
-    Adjust to match your actual GraphPolicy implementation.
+    Matches the GraphPolicy implementation in eng/policies_graph.py.
     """
     mapping = {
-        0: "NOP",
-        1: "ADD",
-        2: "SUB",
-        3: "MUL",
-        4: "MAX",
-        5: "MIN",
-        6: "SIGMOID",
-        7: "TANH",
-        8: "RELU",
+        0: "LINEAR",
+        1: "TANH",
+        2: "RELU",
+        3: "SOFTSIGN",
+        4: "PRODUCT",
+        5: "ABS",
+        6: "MIN",
+        7: "MAX",
     }
     return mapping.get(int(op_code), f"OP{int(op_code)}")
 

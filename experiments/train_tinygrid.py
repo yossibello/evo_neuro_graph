@@ -94,6 +94,19 @@ def main():
     choices=["easy", "medium", "hard"],
     help="TinyGrid difficulty level"
     )
+    ap.add_argument(
+    "--size",
+    type=int,
+    default=7,
+    help="Grid size (must match TinyGrid).",
+    )
+    # Graph policy architecture
+    ap.add_argument("--graph_nodes", type=int, default=64,
+                    help="Number of nodes in graph policy")
+    ap.add_argument("--graph_ticks", type=int, default=3,
+                    help="Number of execution ticks per forward pass")
+    ap.add_argument("--graph_registers", type=int, default=96,
+                    help="Number of registers in graph policy")
     args = ap.parse_args()
 
     # Configure GA
@@ -106,10 +119,13 @@ def main():
         sigma_decay=args.sigma_decay,
         crossover_rate=args.crossover_rate,
         seed=args.seed,
-        init_policy=args.init_policy,   # NEW
+        init_policy=args.init_policy,
         policy=args.policy,
         generations=args.generations,
-        processes=args.processes,  
+        processes=args.processes,
+        graph_nodes=args.graph_nodes,
+        graph_ticks=args.graph_ticks,
+        graph_registers=args.graph_registers,
     )
 
     # Run GA (multi-core)

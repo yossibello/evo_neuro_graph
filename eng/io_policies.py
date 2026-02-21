@@ -52,18 +52,16 @@ def load_policy_npz(path: str):
                 raise ValueError(f"Missing b{i} for MLP in {path}")
             bs.append(bi)
             i += 1
-        params = []
-        for W, b in zip(Ws, bs):
-            params.append(W)
-            params.append(b)
-        return MLPPolicy(params=params)
+        layers = list(zip(Ws, bs))
+        return MLPPolicy(layers=layers)
 
     # -------- GraphPolicy ----------
     if (kind == "graph") or ("graph_params" in keys):
         if not HAS_GRAPH:
             raise ValueError("GraphPolicy not available but graph npz was loaded.")
         gp = d["graph_params"]
-        nr = int(d.get("num_registers", 48))
-        return GraphPolicy(num_registers=nr, node_params=gp)
+        nr = int(d.get("num_registers", 96))
+        nt = int(d.get("num_ticks", 3))
+        return GraphPolicy(num_registers=nr, num_ticks=nt, node_params=gp)
 
     raise ValueError(f"Unrecognized policy format in {path}: keys={keys}, kind={kind}")
