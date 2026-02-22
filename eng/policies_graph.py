@@ -1,26 +1,27 @@
 # eng/policies_graph.py
 """
-Evolved computational graph — a register machine whose topology and weights
-are optimised by a genetic algorithm.
+Evolved computational graph — a register machine whose topology, weights,
+and **learning rules** are optimised by a genetic algorithm.
 
 Design principles
 -----------------
 1. **Multiple execution ticks** — information propagates across ticks (like
-   recurrent "brain cycles").  Observation is re-injected each tick so inputs
-   are never overwritten.
-2. **Sigmoid gates** — every node is alive (soft gate in (0, 1)).  No binary
-   dead/alive cliff that freezes evolution.
-3. **Learnable weights in every op** — all 8 ops use an affine transform
-   (w0·x0 + w1·x1 + bias), making the parameter space smooth for mutation.
-4. **Vectorised forward pass** — all nodes fire simultaneously each tick with
-   scatter-add to shared registers (like synaptic summation).
-5. **Register clamping** — values clipped to [-10, 10] each tick to prevent
-   numerical explosion.
+   recurrent "brain cycles").  Observation is re-injected each tick.
+2. **Sigmoid gates** — every node is alive (soft gate in (0, 1)).
+3. **Learnable weights in every op** — all 8 ops use an affine transform.
+4. **Persistent memory** — a subset of registers survive between time steps.
+5. **Hebbian plasticity** — evolved per-node learning rates allow the circuit
+   to learn DURING its lifetime via reward-modulated Hebbian updates:
+       Δw = η × pre × post × reward_signal
+   Evolution doesn't just evolve a solution — it evolves the ability to learn.
+6. **Vectorised forward pass** — all nodes fire simultaneously each tick.
+7. **Register clamping** — values clipped to [-10, 10] each tick.
 """
 
 import numpy as np
 
-NUM_OPS = 8  # number of distinct node operations
+NUM_OPS = 8          # number of distinct node operations
+NUM_NODE_COLS = 11   # src0, src1, dst, op, w0, w1, bias, gate, eta_w0, eta_w1, eta_bias
 
 
 class GraphPolicy:
@@ -35,16 +36,19 @@ class GraphPolicy:
     [mem_base .. action_base)  — MEMORY (persists between time steps, decays slowly)
     [action_base .. num_reg)   — action logits (5 outputs, reset each call)
 
-    Node parameter row (8 columns)
+    Node parameter row (11 columns)
     -------------------------------
-    0: src0   — index of first source register
-    1: src1   — index of second source register
-    2: dst    — index of destination register
-    3: op_id  — which of the 8 operations to apply
-    4: w0     — weight on first source
-    5: w1     — weight on second source
-    6: bias   — additive bias
-    7: gate   — sigmoid gate input (controls contribution strength)
+    0: src0      — index of first source register
+    1: src1      — index of second source register
+    2: dst       — index of destination register
+    3: op_id     — which of the 8 operations to apply
+    4: w0        — weight on first source  (base / genome)
+    5: w1        — weight on second source (base / genome)
+    6: bias      — additive bias           (base / genome)
+    7: gate      — sigmoid gate input (controls contribution strength)
+    8: eta_w0    — Hebbian learning rate for w0 (evolved)
+    9: eta_w1    — Hebbian learning rate for w1 (evolved)
+   10: eta_bias  — Hebbian learning rate for bias (evolved)
     """
 
     def __init__(
@@ -69,6 +73,13 @@ class GraphPolicy:
             node_params = self._init_random(int(num_nodes))
         else:
             node_params = np.asarray(node_params, dtype=np.float32)
+            # Backward compat: pad old 8-col checkpoints → 11 cols
+            if node_params.shape[1] < NUM_NODE_COLS:
+                pad = np.zeros(
+                    (node_params.shape[0], NUM_NODE_COLS - node_params.shape[1]),
+                    dtype=np.float32,
+                )
+                node_params = np.hstack([node_params, pad])
 
         self.node_params = node_params
         self.num_nodes = self.node_params.shape[0]
@@ -99,7 +110,7 @@ class GraphPolicy:
         nm = self.num_memory
         na = self.n_actions
 
-        p = np.zeros((N, 8), dtype=np.float32)
+        p = np.zeros((N, NUM_NODE_COLS), dtype=np.float32)
         idx = 0
 
         # --- Backbone: input -> action ---
@@ -166,6 +177,11 @@ class GraphPolicy:
             p[i, 6] = np.random.randn() * 0.1
             p[i, 7] = np.random.uniform(0.5, 2.5)
 
+        # --- Evolved learning rates for ALL nodes ---
+        p[:, 8]  = np.random.randn(N) * 0.01   # eta_w0
+        p[:, 9]  = np.random.randn(N) * 0.01   # eta_w1
+        p[:, 10] = np.random.randn(N) * 0.005  # eta_bias
+
         return p
 
     # ------------------------------------------------------------------
@@ -207,8 +223,18 @@ class GraphPolicy:
         }
 
     def reset_memory(self):
-        """Clear memory registers (call between episodes, NOT between steps)."""
+        """Reset all ephemeral state between episodes."""
+        # Clear memory registers
         self.registers[self.mem_base : self.action_base] = 0.0
+        # Reset live weights back to evolved base weights
+        self.live_w0[:] = self.w0
+        self.live_w1[:] = self.w1
+        self.live_bias[:] = self.bias
+        # Clear activity traces
+        N = self.num_nodes
+        self._trace_pre0 = np.zeros(N, dtype=np.float32)
+        self._trace_pre1 = np.zeros(N, dtype=np.float32)
+        self._trace_post = np.zeros(N, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Cache (integer indices + float weights extracted for fast forward)
@@ -216,14 +242,28 @@ class GraphPolicy:
     def _rebuild_cache(self):
         p = self.node_params
         nr = self.num_registers
+        N = p.shape[0]
         self.src0 = np.clip(np.round(p[:, 0]).astype(np.int32), 0, nr - 1)
         self.src1 = np.clip(np.round(p[:, 1]).astype(np.int32), 0, nr - 1)
         self.dst  = np.clip(np.round(p[:, 2]).astype(np.int32), 0, nr - 1)
         self.op   = np.clip(np.round(p[:, 3]).astype(np.int32), 0, NUM_OPS - 1)
+        # Base weights (the "genome" — never change during an episode)
         self.w0   = p[:, 4].copy()
         self.w1   = p[:, 5].copy()
         self.bias = p[:, 6].copy()
         self.gate = p[:, 7].copy()
+        # Evolved learning rates (Hebbian plasticity)
+        self.eta_w0   = p[:, 8].copy()
+        self.eta_w1   = p[:, 9].copy()
+        self.eta_bias = p[:, 10].copy()
+        # Live weights (modified by Hebbian learning during episode)
+        self.live_w0   = self.w0.copy()
+        self.live_w1   = self.w1.copy()
+        self.live_bias = self.bias.copy()
+        # Activity traces for Hebbian update
+        self._trace_pre0 = np.zeros(N, dtype=np.float32)
+        self._trace_pre1 = np.zeros(N, dtype=np.float32)
+        self._trace_post = np.zeros(N, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Forward pass (vectorised — all nodes fire simultaneously per tick)
@@ -246,7 +286,7 @@ class GraphPolicy:
 
         # Zero scratch + action registers, but KEEP memory registers!
         R[:obs_dim] = 0.0                           # obs (will be overwritten)
-        R[obs_dim:self.mem_base] = 0.0              # scratch  
+        R[obs_dim:self.mem_base] = 0.0              # scratch
         # Memory decays but persists:
         R[self.mem_base:self.action_base] *= self.memory_decay
         R[self.action_base:] = 0.0                  # action logits
@@ -265,10 +305,10 @@ class GraphPolicy:
             x0 = R[self.src0]           # (N,)
             x1 = R[self.src1]           # (N,)
 
-            # --- Affine building blocks ---
-            wx0 = self.w0 * x0          # (N,)
-            wx1 = self.w1 * x1          # (N,)
-            z   = wx0 + wx1 + self.bias
+            # --- Affine building blocks (using LIVE weights) ---
+            wx0 = self.live_w0 * x0     # (N,)
+            wx1 = self.live_w1 * x1     # (N,)
+            z   = wx0 + wx1 + self.live_bias
 
             # --- Compute all 8 ops for all nodes (vectorised) ---
             y_all = np.empty((NUM_OPS, N), dtype=np.float32)
@@ -276,10 +316,10 @@ class GraphPolicy:
             y_all[1] = np.tanh(z)                             # tanh
             y_all[2] = np.maximum(0.0, z)                     # relu
             y_all[3] = z / (1.0 + np.abs(z))                 # softsign
-            y_all[4] = wx0 * wx1 + self.bias                 # product
+            y_all[4] = wx0 * wx1 + self.live_bias            # product
             y_all[5] = np.abs(z)                              # abs
-            y_all[6] = np.minimum(wx0, wx1) + self.bias      # weighted min
-            y_all[7] = np.maximum(wx0, wx1) + self.bias      # weighted max
+            y_all[6] = np.minimum(wx0, wx1) + self.live_bias  # weighted min
+            y_all[7] = np.maximum(wx0, wx1) + self.live_bias  # weighted max
 
             # --- Select per-node op ---
             y = y_all[self.op, node_idx]                      # (N,)
@@ -294,7 +334,37 @@ class GraphPolicy:
             np.clip(R, -10.0, 10.0, out=R)
             np.nan_to_num(R, copy=False, nan=0.0, posinf=10.0, neginf=-10.0)
 
+        # Store traces from final tick (for Hebbian update)
+        self._trace_pre0 = x0.copy()
+        self._trace_pre1 = x1.copy()
+        self._trace_post = y_gated.copy()
+
         return R[self.action_base : self.action_base + self.n_actions].copy()
+
+    # ------------------------------------------------------------------
+    # Hebbian plasticity — reward-modulated lifetime learning
+    #
+    # Three-factor rule:  Δw = η × pre × post × reward
+    #   - pre:    source register value (what fired into this node)
+    #   - post:   gated output of this node (what this node produced)
+    #   - reward: environment reward signal (dopamine-like modulation)
+    #   - η:      evolved per-node learning rate (genome decides HOW to learn)
+    #
+    # This means the GA doesn't evolve a solution — it evolves a LEARNER.
+    # ------------------------------------------------------------------
+    def hebbian_update(self, reward: float):
+        """Reward-modulated Hebbian update. Call AFTER each env.step()."""
+        mod = np.float32(np.clip(reward, -2.0, 2.0))  # modulatory signal
+
+        # Three-factor Hebbian rule
+        self.live_w0   += self.eta_w0   * self._trace_pre0 * self._trace_post * mod
+        self.live_w1   += self.eta_w1   * self._trace_pre1 * self._trace_post * mod
+        self.live_bias += self.eta_bias * self._trace_post * mod
+
+        # Clamp live weights to prevent runaway
+        np.clip(self.live_w0,   -5.0, 5.0, out=self.live_w0)
+        np.clip(self.live_w1,   -5.0, 5.0, out=self.live_w1)
+        np.clip(self.live_bias, -5.0, 5.0, out=self.live_bias)
 
     # ------------------------------------------------------------------
     # Action helper

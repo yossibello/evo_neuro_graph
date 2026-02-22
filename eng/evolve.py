@@ -49,6 +49,10 @@ def mutate_inplace(policy, sigma: float):
         # Parametric: continuous Gaussian on weights/gate only
         for col in (4, 5, 6, 7):
             policy.node_params[:, col] += np.random.randn(N) * sigma
+        # Learning rates: smaller perturbation to keep them stable
+        if policy.node_params.shape[1] > 8:
+            for col in (8, 9, 10):
+                policy.node_params[:, col] += np.random.randn(N) * sigma * 0.3
         policy._rebuild_cache()
 
     elif hasattr(policy, "W"):  # linear
@@ -181,6 +185,9 @@ def evaluate_policy(policy,
         while not done and steps < max_steps:
             action = select_action(policy, obs, rng)   # ✅ make sure this is using the helper
             obs, reward, done, _info = env.step(action)
+            # Hebbian plasticity: reward-modulated lifetime learning
+            if hasattr(policy, 'hebbian_update'):
+                policy.hebbian_update(reward)
             ep_reward += reward
             steps += 1
 
@@ -349,6 +356,10 @@ def mutate(policy, sigma: float, rng: np.random.RandomState, stag_pressure: floa
         # --- Parametric mutations (continuous Gaussian on weights/gate only) ---
         for col in (4, 5, 6, 7):   # w0, w1, bias, gate
             node_params[:, col] += rng.normal(0.0, sigma, size=N).astype(np.float32)
+        # --- Learning rate mutations (smaller sigma to keep stable) ---
+        if node_params.shape[1] > 8:
+            for col in (8, 9, 10):  # eta_w0, eta_w1, eta_bias
+                node_params[:, col] += rng.normal(0.0, sigma * 0.3, size=N).astype(np.float32)
 
         child.node_params = node_params.astype(np.float32)
         child._rebuild_cache()
