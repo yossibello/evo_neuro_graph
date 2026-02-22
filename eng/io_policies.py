@@ -60,8 +60,12 @@ def load_policy_npz(path: str):
         if not HAS_GRAPH:
             raise ValueError("GraphPolicy not available but graph npz was loaded.")
         gp = d["graph_params"]
-        nr = int(d.get("num_registers", 96))
+        nr = int(d.get("num_registers", 128))
         nt = int(d.get("num_ticks", 3))
-        return GraphPolicy(num_registers=nr, num_ticks=nt, node_params=gp)
+        nm = int(d.get("num_memory", 16))
+        md_arr = d.get("memory_decay", None)
+        md = float(md_arr) if md_arr is not None else 0.95
+        return GraphPolicy(num_registers=nr, num_ticks=nt, num_memory=nm,
+                           memory_decay=md, node_params=gp)
 
     raise ValueError(f"Unrecognized policy format in {path}: keys={keys}, kind={kind}")

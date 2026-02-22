@@ -105,8 +105,10 @@ def main():
                     help="Number of nodes in graph policy")
     ap.add_argument("--graph_ticks", type=int, default=3,
                     help="Number of execution ticks per forward pass")
-    ap.add_argument("--graph_registers", type=int, default=96,
+    ap.add_argument("--graph_registers", type=int, default=128,
                     help="Number of registers in graph policy")
+    ap.add_argument("--graph_memory", type=int, default=16,
+                    help="Number of persistent memory registers")
     # Anti-stagnation
     ap.add_argument("--stagnation_window", type=int, default=15,
                     help="Gens without improvement before sigma restart")
@@ -132,6 +134,7 @@ def main():
         graph_nodes=args.graph_nodes,
         graph_ticks=args.graph_ticks,
         graph_registers=args.graph_registers,
+        graph_memory=args.graph_memory,
         stagnation_window=args.stagnation_window,
         tournament_k=args.tournament_k,
     )

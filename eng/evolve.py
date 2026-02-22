@@ -115,7 +115,8 @@ class GAConfig:
     # Graph policy config
     graph_nodes: int = 64
     graph_ticks: int = 3
-    graph_registers: int = 96
+    graph_registers: int = 128
+    graph_memory: int = 16
 
 
 
@@ -140,6 +141,7 @@ def make_policy(kind: str, cfg: 'GAConfig | None' = None):
                 num_registers=cfg.graph_registers,
                 num_nodes=cfg.graph_nodes,
                 num_ticks=cfg.graph_ticks,
+                num_memory=cfg.graph_memory,
             )
         return GraphPolicy(**kw)
     raise ValueError(f"Unknown policy kind: {kind}")
@@ -167,6 +169,10 @@ def evaluate_policy(policy,
     for _ in range(episodes):
         env = env_maker()
         obs = env.reset(seed=int(rng.randint(0, 2**31 - 1)))
+
+        # Reset memory between episodes (not between steps!)
+        if hasattr(policy, 'reset_memory'):
+            policy.reset_memory()
 
         ep_reward = 0.0
         done = False

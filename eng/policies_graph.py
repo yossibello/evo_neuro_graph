@@ -26,13 +26,14 @@ NUM_OPS = 8  # number of distinct node operations
 class GraphPolicy:
     """
     A policy that evolves a small "brain circuit" of N computational nodes
-    operating on a shared register file.
+    operating on a shared register file **with persistent memory**.
 
     Register layout
     ---------------
-    [0 .. obs_dim)           — observation input (re-injected each tick)
-    [obs_dim .. action_base) — scratch / intermediate computation
-    [action_base .. num_reg) — action logits (5 outputs)
+    [0 .. obs_dim)             — observation input (re-injected each tick)
+    [obs_dim .. mem_base)      — scratch / intermediate computation (reset each call)
+    [mem_base .. action_base)  — MEMORY (persists between time steps, decays slowly)
+    [action_base .. num_reg)   — action logits (5 outputs, reset each call)
 
     Node parameter row (8 columns)
     -------------------------------
@@ -48,15 +49,21 @@ class GraphPolicy:
 
     def __init__(
         self,
-        num_registers: int = 96,
+        num_registers: int = 128,
         num_nodes: int = 64,
         num_ticks: int = 3,
+        num_memory: int = 16,
+        memory_decay: float = 0.95,
         node_params: np.ndarray | None = None,
     ):
         self.num_registers = int(num_registers)
         self.num_ticks = int(num_ticks)
+        self.num_memory = int(num_memory)
+        self.memory_decay = float(memory_decay)
         self.n_actions = 5
         self.action_base = self.num_registers - self.n_actions
+        # Memory sits right before actions
+        self.mem_base = self.action_base - self.num_memory
 
         if node_params is None:
             node_params = self._init_random(int(num_nodes))
@@ -79,6 +86,8 @@ class GraphPolicy:
         """
         Smart initial wiring:
           - ~10 backbone nodes:     obs -> action  (ensures non-trivial output)
+          - ~8 memory nodes:        obs -> memory  (seed memory usage)
+          - ~8 memory-read nodes:   memory -> action (seed memory readout)
           - ~10 intermediate nodes: obs -> scratch  (enables multi-tick processing)
           - rest:                   random -> random (diversity for evolution)
         All gates start positive so every node is alive from the start.
@@ -86,38 +95,68 @@ class GraphPolicy:
         nr = self.num_registers
         obs_dim = 61  # TinyGrid observation dimension
         ab = self.action_base
+        mb = self.mem_base
+        nm = self.num_memory
         na = self.n_actions
 
         p = np.zeros((N, 8), dtype=np.float32)
+        idx = 0
 
         # --- Backbone: input -> action ---
-        n_bb = min(10, N)
+        n_bb = min(10, N - idx)
         for i in range(n_bb):
-            p[i, 0] = np.random.randint(0, obs_dim)       # src0 from obs
-            p[i, 1] = np.random.randint(0, obs_dim)       # src1 from obs
-            p[i, 2] = ab + (i % na)                        # dst to action
-            p[i, 3] = 1                                     # tanh op
-            p[i, 4] = np.random.randn() * 0.5              # w0
-            p[i, 5] = np.random.randn() * 0.5              # w1
-            p[i, 6] = np.random.randn() * 0.1              # bias
-            p[i, 7] = np.random.uniform(1.5, 3.0)          # gate (strongly on)
+            p[idx, 0] = np.random.randint(0, obs_dim)       # src0 from obs
+            p[idx, 1] = np.random.randint(0, obs_dim)       # src1 from obs
+            p[idx, 2] = ab + (i % na)                       # dst to action
+            p[idx, 3] = 1                                    # tanh op
+            p[idx, 4] = np.random.randn() * 0.5             # w0
+            p[idx, 5] = np.random.randn() * 0.5             # w1
+            p[idx, 6] = np.random.randn() * 0.1             # bias
+            p[idx, 7] = np.random.uniform(1.5, 3.0)         # gate (strongly on)
+            idx += 1
+
+        # --- Memory writers: obs -> memory ---
+        n_mw = min(8, N - idx)
+        for i in range(n_mw):
+            p[idx, 0] = np.random.randint(0, obs_dim)
+            p[idx, 1] = np.random.randint(0, obs_dim)
+            p[idx, 2] = mb + (i % nm)                       # dst to memory
+            p[idx, 3] = np.random.choice([0, 1, 3])         # linear/tanh/softsign
+            p[idx, 4] = np.random.randn() * 0.3
+            p[idx, 5] = np.random.randn() * 0.3
+            p[idx, 6] = np.random.randn() * 0.1
+            p[idx, 7] = np.random.uniform(1.0, 2.5)
+            idx += 1
+
+        # --- Memory readers: memory -> action/scratch ---
+        n_mr = min(8, N - idx)
+        for i in range(n_mr):
+            p[idx, 0] = mb + np.random.randint(0, nm)        # src0 from memory
+            p[idx, 1] = np.random.randint(0, obs_dim)        # src1 from obs (context)
+            p[idx, 2] = ab + (i % na) if i < na else np.random.randint(obs_dim, mb)
+            p[idx, 3] = np.random.choice([0, 1, 3])
+            p[idx, 4] = np.random.randn() * 0.3
+            p[idx, 5] = np.random.randn() * 0.3
+            p[idx, 6] = np.random.randn() * 0.1
+            p[idx, 7] = np.random.uniform(1.0, 2.5)
+            idx += 1
 
         # --- Intermediate: input -> scratch ---
-        n_mid = min(10, N - n_bb)
+        n_mid = min(10, N - idx)
         for ii in range(n_mid):
-            i = n_bb + ii
-            p[i, 0] = np.random.randint(0, obs_dim)
-            p[i, 1] = np.random.randint(0, obs_dim)
-            scratch_reg = np.random.randint(obs_dim, ab) if obs_dim < ab else 0
-            p[i, 2] = scratch_reg
-            p[i, 3] = np.random.randint(0, NUM_OPS)
-            p[i, 4] = np.random.randn() * 0.3
-            p[i, 5] = np.random.randn() * 0.3
-            p[i, 6] = np.random.randn() * 0.1
-            p[i, 7] = np.random.uniform(1.0, 2.5)
+            p[idx, 0] = np.random.randint(0, obs_dim)
+            p[idx, 1] = np.random.randint(0, obs_dim)
+            scratch_reg = np.random.randint(obs_dim, mb) if obs_dim < mb else 0
+            p[idx, 2] = scratch_reg
+            p[idx, 3] = np.random.randint(0, NUM_OPS)
+            p[idx, 4] = np.random.randn() * 0.3
+            p[idx, 5] = np.random.randn() * 0.3
+            p[idx, 6] = np.random.randn() * 0.1
+            p[idx, 7] = np.random.uniform(1.0, 2.5)
+            idx += 1
 
         # --- Random: any -> any ---
-        for i in range(n_bb + n_mid, N):
+        for i in range(idx, N):
             p[i, 0] = np.random.randint(0, nr)
             p[i, 1] = np.random.randint(0, nr)
             p[i, 2] = np.random.randint(0, nr)
@@ -147,12 +186,15 @@ class GraphPolicy:
         self._sync_params_list()
 
     def clone(self):
-        return GraphPolicy(
+        c = GraphPolicy(
             num_registers=self.num_registers,
             num_nodes=self.num_nodes,
             num_ticks=self.num_ticks,
+            num_memory=self.num_memory,
+            memory_decay=self.memory_decay,
             node_params=self.node_params.copy(),
         )
+        return c
 
     def as_dict(self):
         return {
@@ -160,7 +202,13 @@ class GraphPolicy:
             "graph_params": self.node_params,
             "num_registers": np.array(self.num_registers, dtype=np.int32),
             "num_ticks": np.array(self.num_ticks, dtype=np.int32),
+            "num_memory": np.array(self.num_memory, dtype=np.int32),
+            "memory_decay": np.array(self.memory_decay, dtype=np.float32),
         }
+
+    def reset_memory(self):
+        """Clear memory registers (call between episodes, NOT between steps)."""
+        self.registers[self.mem_base : self.action_base] = 0.0
 
     # ------------------------------------------------------------------
     # Cache (integer indices + float weights extracted for fast forward)
@@ -195,7 +243,13 @@ class GraphPolicy:
         obs_dim = obs.shape[0]
 
         R = self.registers
-        R.fill(0.0)
+
+        # Zero scratch + action registers, but KEEP memory registers!
+        R[:obs_dim] = 0.0                           # obs (will be overwritten)
+        R[obs_dim:self.mem_base] = 0.0              # scratch  
+        # Memory decays but persists:
+        R[self.mem_base:self.action_base] *= self.memory_decay
+        R[self.action_base:] = 0.0                  # action logits
 
         N = self.num_nodes
         node_idx = np.arange(N)
