@@ -500,6 +500,10 @@ def run_ga(
     rng = np.random.RandomState(cfg.seed)
       # ---------- population init ----------
     sigma = cfg.mutation_sigma
+
+    best_ever_f = -float('inf')
+    best_ever_policy = None
+
     if cfg.init_policy:
         base = _load_policy_npz(cfg.init_policy, cfg.policy)
         print(f"[DEBUG] init_policy={cfg.init_policy}, type={type(base)}")
@@ -523,8 +527,19 @@ def run_ga(
             np.random.RandomState(cfg.seed + 1234),
         )
         print(f"[DEBUG] init_policy fitness {f0:+.3f} (r {r0:+.3f}, s {s0:.2f})")
+
+        # Initialize best_ever from init_policy
+        best_ever_f = f0
+        best_ever_policy = base.clone()
+        os.makedirs("artifacts", exist_ok=True)
+        save_policy_npz(best_ever_policy, "artifacts/best_ever_policy.npz")
     else:
         pop = [make_policy(cfg.policy, cfg) for _ in range(cfg.pop_size)]
+
+    # ---- Stagnation tracking ----
+    gens_since_improvement = 0
+    hall_of_fame = []  # stores (fitness, policy) of all-time bests
+    HOF_SIZE = 5
 
     fitness = np.zeros(cfg.pop_size, dtype=np.float32)
     avg_rewards = np.zeros(cfg.pop_size, dtype=np.float32)
