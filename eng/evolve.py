@@ -541,18 +541,15 @@ def run_ga(
     hall_of_fame = []  # stores (fitness, policy) of all-time bests
     HOF_SIZE = 5
 
+    # Seed hall of fame with init_policy if loaded
+    if best_ever_policy is not None:
+        hall_of_fame.append((best_ever_f, best_ever_policy.clone()))
+
     fitness = np.zeros(cfg.pop_size, dtype=np.float32)
     avg_rewards = np.zeros(cfg.pop_size, dtype=np.float32)
     success_rates = np.zeros(cfg.pop_size, dtype=np.float32)
 
-    sigma = cfg.mutation_sigma
     history: List[Dict[str, float]] = []
-
-    # ---- Stagnation tracking ----
-    best_ever_f = -float('inf')
-    gens_since_improvement = 0
-    hall_of_fame = []  # stores (fitness, policy) of all-time bests
-    HOF_SIZE = 5
 
     # Multiprocessing context (spawn works everywhere)
     ctx = mp.get_context("spawn")
