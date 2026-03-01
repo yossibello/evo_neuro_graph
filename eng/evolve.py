@@ -96,6 +96,15 @@ class GAConfig:
     sigma_restart_cap: float = 1.0      # restart sigma capped at this fraction of initial
     fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
 
+    # Extinction events (biological mass extinction / creative destruction)
+    extinction_every_n_stag: int = 2    # trigger extinction every Nth stagnation restart
+    extinction_kill_frac: float = 0.40  # fraction of pop wiped in extinction
+
+    # Behavioral diversity (fitness sharing)
+    diversity_enabled: bool = True       # penalize identical behaviors
+    diversity_num_seeds: int = 4         # fixed seeds for behavioral fingerprint
+    diversity_sharing_sigma: float = 0.1 # sharing radius (lower = more selective)
+
     # Tournament selection
     tournament_k: int = 4               # tournament size for parent selection
 
@@ -232,6 +241,63 @@ def evaluate_policy(policy,
     )
 
     return fitness, avg_reward, strict_sr
+
+
+def _behavioral_fingerprint(policy, env_ctor, env_kwargs, n_seeds=4, max_steps=50):
+    """
+    Compute a behavioral fingerprint: a short vector of actions the policy
+    takes on fixed seeds. Used for diversity / fitness sharing.
+
+    Like how in nature, two animals might have similar genes but different
+    hunting strategies — we want to protect BEHAVIORAL diversity, not just
+    genetic diversity.
+    """
+    actions = []
+    for seed in range(n_seeds):
+        env = env_ctor(**(env_kwargs or {}))
+        obs = env.reset(seed=seed * 1000 + 42)
+        if hasattr(policy, 'reset_memory'):
+            policy.reset_memory()
+        rng = np.random.RandomState(seed)
+        for _ in range(min(max_steps, 10)):  # just first 10 steps
+            logits = policy(obs)
+            action = int(np.argmax(logits))
+            actions.append(action)
+            obs, _, done, _ = env.step(action)
+            if done:
+                actions.extend([0] * (10 - len(actions) % 10))  # pad
+                break
+    return np.array(actions, dtype=np.float32)
+
+
+def _fitness_sharing(fitness_arr, fingerprints, sharing_sigma=0.1):
+    """
+    Fitness sharing: divide each individual's fitness by its niche count.
+    Individuals with identical behavior share their fitness — this
+    pressures the population to maintain diverse strategies.
+
+    Like ecological niches: if 50 animals eat the same food, they compete
+    harder than 5 animals each eating different foods.
+    """
+    n = len(fingerprints)
+    if n == 0:
+        return fitness_arr
+
+    # Normalize fingerprints for distance computation
+    fp_matrix = np.array(fingerprints, dtype=np.float32)  # (n, D)
+    # Pairwise Hamming-like distance (fraction of different actions)
+    shared_fitness = fitness_arr.copy()
+    for i in range(n):
+        # Count how many others behave similarly
+        if fp_matrix.shape[0] < 2:
+            break
+        dists = np.mean(fp_matrix[i] != fp_matrix, axis=1)  # (n,)
+        # Sharing function: sh(d) = 1 if d < sigma, else 0
+        niche_count = np.sum(dists < sharing_sigma)
+        niche_count = max(1.0, niche_count)
+        shared_fitness[i] = fitness_arr[i] / niche_count
+
+    return shared_fitness
 
 
 
@@ -538,6 +604,7 @@ def run_ga(
 
     # ---- Stagnation tracking ----
     gens_since_improvement = 0
+    stagnation_restarts = 0  # count how many times we've restarted sigma
     hall_of_fame = []  # stores (fitness, policy) of all-time bests
     HOF_SIZE = 5
 
@@ -621,11 +688,37 @@ def run_ga(
                         avg_rewards[idx] = (w1 * avg_rewards[idx] + w2 * r2) / wt
                         success_rates[idx] = (w1 * success_rates[idx] + w2 * s2) / wt
 
+            # ---- Behavioral diversity (fitness sharing) ----
+            # Compute behavioral fingerprints and apply fitness sharing
+            # so identical-behaving clones don't crowd out diverse strategies.
+            # Like ecological niches: same-niche organisms share resources.
+            raw_fitness = fitness.copy()  # preserve raw fitness for logging
+            if cfg.diversity_enabled and env_ctor is not None:
+                try:
+                    fingerprints = []
+                    for pol in pop:
+                        fp = _behavioral_fingerprint(
+                            pol, env_ctor, env_kwargs,
+                            n_seeds=cfg.diversity_num_seeds,
+                        )
+                        fingerprints.append(fp)
+                    # Apply sharing to selection fitness (not raw fitness for logging)
+                    selection_fitness = _fitness_sharing(
+                        fitness, fingerprints, cfg.diversity_sharing_sigma
+                    )
+                except Exception:
+                    selection_fitness = fitness  # fallback if fingerprinting fails
+            else:
+                selection_fitness = fitness
+
             # ---- Selection & logging ----
-            order = np.argsort(fitness)[::-1]
+            order = np.argsort(selection_fitness)[::-1]
+            # Elites chosen by SHARED fitness (rewards diverse strategies)
             elites = [pop[i] for i in order[:cfg.elites]]
-            best_idx = int(order[0])
-            gen_best_f = float(fitness[best_idx])
+            # But best_idx uses RAW fitness (actual performance, not adjusted)
+            raw_order = np.argsort(raw_fitness)[::-1]
+            best_idx = int(raw_order[0])
+            gen_best_f = float(raw_fitness[best_idx])
 
             # ---- Hall of Fame tracking ----
             if gen_best_f > best_ever_f:
@@ -642,15 +735,59 @@ def run_ga(
             else:
                 gens_since_improvement += 1
 
-            # ---- Stagnation detection & sigma restart ----
+            # ---- Stagnation detection & sigma restart + EXTINCTION ----
             stag_tag = ""
             stag_pressure = min(1.0, gens_since_improvement / max(1, cfg.stagnation_window))
             if gens_since_improvement >= cfg.stagnation_window:
+                stagnation_restarts += 1
                 old_sigma = sigma
                 sigma_cap = cfg.mutation_sigma * cfg.sigma_restart_cap
                 sigma = min(sigma * cfg.sigma_restart_mult, sigma_cap)
                 gens_since_improvement = 0
-                stag_tag = f" | STAG_RESTART sigma {old_sigma:.4f}->{sigma:.4f}"
+                stag_tag = f" | STAG_RESTART #{stagnation_restarts} sigma {old_sigma:.4f}->{sigma:.4f}"
+
+                # ---- EXTINCTION EVENT ----
+                # Every Nth stagnation restart, trigger a mass extinction.
+                # Like the asteroid that killed the dinosaurs — wipe out the
+                # bottom portion of the population and fill with radically
+                # different alternatives. The strong survive, the stuck die.
+                if stagnation_restarts % cfg.extinction_every_n_stag == 0:
+                    n_kill = int(cfg.pop_size * cfg.extinction_kill_frac)
+                    # Kill the weakest individuals
+                    survivors = [pop[i] for i in order[:cfg.pop_size - n_kill]]
+
+                    # Replace with a mix of:
+                    # 1) Heavily mutated hall-of-fame (proven DNA, new expression)
+                    # 2) Heavily mutated elites (local diversity explosion)
+                    # 3) Completely fresh randoms (alien immigrants)
+                    replacements: List[Any] = []
+                    n_hof_mutants = n_kill // 3
+                    n_elite_mutants = n_kill // 3
+                    n_randoms = n_kill - n_hof_mutants - n_elite_mutants
+
+                    # Heavily mutated HOF clones (3x sigma — radically different)
+                    for i in range(n_hof_mutants):
+                        if hall_of_fame:
+                            src = hall_of_fame[i % len(hall_of_fame)][1]
+                        else:
+                            src = elites[0]
+                        child = src.clone()
+                        child = mutate(child, sigma * 3.0, rng, stag_pressure=1.0)
+                        replacements.append(child)
+
+                    # Heavily mutated elite clones (2x sigma)
+                    for i in range(n_elite_mutants):
+                        src = elites[i % len(elites)]
+                        child = src.clone()
+                        child = mutate(child, sigma * 2.0, rng, stag_pressure=0.8)
+                        replacements.append(child)
+
+                    # Fresh random individuals (completely new genetic material)
+                    for _ in range(n_randoms):
+                        replacements.append(make_policy(cfg.policy, cfg))
+
+                    pop = survivors + replacements
+                    stag_tag += f" | EXTINCTION killed {n_kill} (hof_mut={n_hof_mutants}, elite_mut={n_elite_mutants}, fresh={n_randoms})"
 
             stats = {
                 "gen": gen,
@@ -715,9 +852,11 @@ def run_ga(
                     new_pop.append(make_policy(cfg.policy, cfg))
 
             # Fill rest via tournament selection + crossover + mutation
+            # Use selection_fitness (diversity-adjusted) so diverse strategies
+            # get higher chance of reproducing — like ecological success.
             while len(new_pop) < cfg.pop_size:
-                p1 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
-                p2 = _tournament_select(pop, fitness, cfg.tournament_k, rng)
+                p1 = _tournament_select(pop, selection_fitness, cfg.tournament_k, rng)
+                p2 = _tournament_select(pop, selection_fitness, cfg.tournament_k, rng)
                 child = crossover(p1, p2, cfg.crossover_rate, rng)
                 child = mutate(child, sigma, rng, stag_pressure=stag_pressure)
                 new_pop.append(child)
