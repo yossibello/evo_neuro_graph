@@ -78,7 +78,7 @@ def main():
     choices=["linear", "mlp", "graph"],)
     ap.add_argument("--generations", type=int, default=200)
     ap.add_argument("--outdir", type=str, default="artifacts")
-    ap.add_argument("--mutation_sigma_floor", type=float, default=0.08)
+    ap.add_argument("--mutation_sigma_floor", type=float, default=0.04)
     ap.add_argument("--init_policy", type=str, default=None,
                 help="Path to a .npz champion to seed the initial population")
     ap.add_argument(

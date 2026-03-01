@@ -87,7 +87,7 @@ class GAConfig:
     # Evolution hyperparams
     mutation_sigma: float = 0.12
     sigma_decay: float = 0.98          # anneal mutation per generation
-    mutation_sigma_floor: float = 0.08
+    mutation_sigma_floor: float = 0.04
     crossover_rate: float = 0.35
 
     # Anti-stagnation
@@ -103,7 +103,7 @@ class GAConfig:
     # Behavioral diversity (fitness sharing)
     diversity_enabled: bool = True       # penalize identical behaviors
     diversity_num_seeds: int = 4         # fixed seeds for behavioral fingerprint
-    diversity_sharing_sigma: float = 0.1 # sharing radius (lower = more selective)
+    diversity_sharing_sigma: float = 0.3 # sharing radius (lower = more selective, 0.3 = only penalize near-clones)
 
     # Tournament selection
     tournament_k: int = 4               # tournament size for parent selection
@@ -688,11 +688,18 @@ def run_ga(
                         avg_rewards[idx] = (w1 * avg_rewards[idx] + w2 * r2) / wt
                         success_rates[idx] = (w1 * success_rates[idx] + w2 * s2) / wt
 
-            # ---- Behavioral diversity (fitness sharing) ----
-            # Compute behavioral fingerprints and apply fitness sharing
-            # so identical-behaving clones don't crowd out diverse strategies.
-            # Like ecological niches: same-niche organisms share resources.
-            raw_fitness = fitness.copy()  # preserve raw fitness for logging
+            # ---- Selection & logging ----
+            # Elites are ALWAYS chosen by RAW fitness (best performers survive)
+            order = np.argsort(fitness)[::-1]
+            elites = [pop[i] for i in order[:cfg.elites]]
+            best_idx = int(order[0])
+            gen_best_f = float(fitness[best_idx])
+
+            # ---- Behavioral diversity (for parent selection only) ----
+            # Diversity pressure only affects tournament selection for offspring,
+            # NOT elite selection. This prevents "diverse but bad" from replacing
+            # actual top performers, while still encouraging the breeding pool
+            # to explore different strategies.
             if cfg.diversity_enabled and env_ctor is not None:
                 try:
                     fingerprints = []
@@ -702,23 +709,13 @@ def run_ga(
                             n_seeds=cfg.diversity_num_seeds,
                         )
                         fingerprints.append(fp)
-                    # Apply sharing to selection fitness (not raw fitness for logging)
                     selection_fitness = _fitness_sharing(
                         fitness, fingerprints, cfg.diversity_sharing_sigma
                     )
                 except Exception:
-                    selection_fitness = fitness  # fallback if fingerprinting fails
+                    selection_fitness = fitness
             else:
                 selection_fitness = fitness
-
-            # ---- Selection & logging ----
-            order = np.argsort(selection_fitness)[::-1]
-            # Elites chosen by SHARED fitness (rewards diverse strategies)
-            elites = [pop[i] for i in order[:cfg.elites]]
-            # But best_idx uses RAW fitness (actual performance, not adjusted)
-            raw_order = np.argsort(raw_fitness)[::-1]
-            best_idx = int(raw_order[0])
-            gen_best_f = float(raw_fitness[best_idx])
 
             # ---- Hall of Fame tracking ----
             if gen_best_f > best_ever_f:
