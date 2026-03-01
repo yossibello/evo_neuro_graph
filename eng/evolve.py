@@ -78,9 +78,9 @@ def mutate_inplace(policy, sigma: float):
 # ----------------------------
 @dataclass
 class GAConfig:
-    pop_size: int = 128
-    elites: int = 24
-    episodes: int = 48
+    pop_size: int = 256
+    elites: int = 48
+    episodes: int = 64
     max_steps: int = 200
     generations: int = 200
 
@@ -93,12 +93,12 @@ class GAConfig:
     # Anti-stagnation
     stagnation_window: int = 15         # react faster to stagnation
     sigma_restart_mult: float = 2.0     # multiply sigma on restart (legacy, escalation replaces this)
-    sigma_restart_cap: float = 3.0      # restart sigma capped higher (0.36)
+    sigma_restart_cap: float = 2.0      # restart sigma capped at this * mutation_sigma (0.24)
     fresh_inject_frac: float = 0.08     # more fresh random injections each gen
 
     # Extinction events (biological mass extinction / creative destruction)
     extinction_every_n_stag: int = 1    # extinction on EVERY stagnation restart
-    extinction_kill_frac: float = 0.50  # kill half the population
+    extinction_kill_frac: float = 0.35  # base kill fraction (escalates)
 
     # Behavioral diversity (fitness sharing)
     diversity_enabled: bool = False      # DISABLED: overhead + corrupts selection; organic diversity via extinction is enough
@@ -136,7 +136,7 @@ class GAConfig:
     # Self-adaptive sigma: each individual evolves its own mutation rate
     self_adaptive_sigma: bool = True
     tau_sigma: float = 0.10             # log-normal adaptation rate (τ)
-    sigma_cap: float = 0.50             # max per-individual sigma
+    sigma_cap: float = 0.30             # max per-individual sigma (was 0.50 — too destructive)
 
     # Novelty search: reward behavioral diversity, not just fitness
     novelty_enabled: bool = True
@@ -943,10 +943,14 @@ def run_ga(
                 # Like escalating environmental pressure — if a mild shock fails,
                 # hit the population harder next time.
                 base_restart = cfg.mutation_sigma * 1.5
-                escalation  = 0.04 * stagnation_restarts
+                escalation  = 0.02 * stagnation_restarts  # gentler escalation (was 0.04)
                 sigma_cap   = cfg.mutation_sigma * cfg.sigma_restart_cap
                 sigma = min(base_restart + escalation, sigma_cap)
                 gens_since_improvement = 0
+
+                # Post-restart cooldown: decay faster for first few gens
+                # so sigma comes back to productive range quickly
+                # (applied after the restart, before next gen's decay)
                 stag_tag = f" | STAG_RESTART #{stagnation_restarts} sigma {old_sigma:.4f}->{sigma:.4f}"
 
                 # ---- EXTINCTION EVENT ----
@@ -958,8 +962,8 @@ def run_ga(
                     # Escalating extinction: each event kills more of the population.
                     # If the first mass extinction didn't help, the next one is harsher.
                     extinction_num = stagnation_restarts // cfg.extinction_every_n_stag
-                    extra_kill = min(0.10 * (extinction_num - 1), 0.25)
-                    eff_kill_frac = min(cfg.extinction_kill_frac + extra_kill, 0.70)
+                    extra_kill = min(0.05 * (extinction_num - 1), 0.15)  # gentler escalation
+                    eff_kill_frac = min(cfg.extinction_kill_frac + extra_kill, 0.55)
                     n_kill = int(cfg.pop_size * eff_kill_frac)
                     # Kill the weakest individuals
                     survivors = [pop[i] for i in order[:cfg.pop_size - n_kill]]
