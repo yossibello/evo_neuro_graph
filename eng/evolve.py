@@ -79,8 +79,8 @@ def mutate_inplace(policy, sigma: float):
 @dataclass
 class GAConfig:
     pop_size: int = 128
-    elites: int = 16
-    episodes: int = 16
+    elites: int = 24
+    episodes: int = 24
     max_steps: int = 200
     generations: int = 200
 
@@ -100,7 +100,7 @@ class GAConfig:
     tournament_k: int = 4               # tournament size for parent selection
 
     # Elite re-evaluation (noise reduction)
-    reeval_factor: int = 1              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
+    reeval_factor: int = 3              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
 
     # RNG
     seed: int = 0
@@ -692,7 +692,16 @@ def run_ga(
 
 
             # ---- Reproduction ----
-            new_pop: List[Any] = [e.clone() for e in elites]  # deep-copy elites
+            new_pop: List[Any] = [e.clone() for e in elites]  # deep-copy elites (unmutated)
+
+            # Soft-mutated elite offspring: clones of top elites with very low
+            # sigma, so the search stays dense around the best solutions.
+            # Like "fine-tuning" the best brains with tiny perturbations.
+            n_soft = min(cfg.elites, cfg.pop_size - len(new_pop))
+            for i in range(n_soft):
+                soft_child = elites[i % len(elites)].clone()
+                soft_child = mutate(soft_child, sigma * 0.3, rng, stag_pressure=0.0)
+                new_pop.append(soft_child)
 
             # Inject hall-of-fame members (persistent memory of best-ever)
             for _, hof_pol in hall_of_fame:

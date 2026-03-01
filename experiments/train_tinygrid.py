@@ -64,8 +64,8 @@ from eng.evolve import save_policy_npz      # we defined this earlier
 def main():
     ap = argparse.ArgumentParser(description="Train an evolutionary TinyGrid agent.")
     ap.add_argument("--pop_size", type=int, default=128)
-    ap.add_argument("--elites", type=int, default=16)
-    ap.add_argument("--episodes", type=int, default=16)
+    ap.add_argument("--elites", type=int, default=24)
+    ap.add_argument("--episodes", type=int, default=24)
     ap.add_argument("--max_steps", type=int, default=200)
     ap.add_argument("--mutation_sigma", type=float, default=0.12)
     ap.add_argument("--sigma_decay", type=float, default=0.98)

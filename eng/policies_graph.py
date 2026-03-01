@@ -235,6 +235,10 @@ class GraphPolicy:
         self._trace_pre0 = np.zeros(N, dtype=np.float32)
         self._trace_pre1 = np.zeros(N, dtype=np.float32)
         self._trace_post = np.zeros(N, dtype=np.float32)
+        # Clear eligibility traces
+        self._elig_pre0 = np.zeros(N, dtype=np.float32)
+        self._elig_pre1 = np.zeros(N, dtype=np.float32)
+        self._elig_post = np.zeros(N, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Cache (integer indices + float weights extracted for fast forward)
@@ -264,6 +268,13 @@ class GraphPolicy:
         self._trace_pre0 = np.zeros(N, dtype=np.float32)
         self._trace_pre1 = np.zeros(N, dtype=np.float32)
         self._trace_post = np.zeros(N, dtype=np.float32)
+        # Eligibility traces (decaying accumulation across time steps)
+        # These allow past activity to receive credit when reward arrives later.
+        # Biologically: synaptic tags that persist and get reinforced by dopamine.
+        self._elig_pre0 = np.zeros(N, dtype=np.float32)
+        self._elig_pre1 = np.zeros(N, dtype=np.float32)
+        self._elig_post = np.zeros(N, dtype=np.float32)
+        self._elig_decay = 0.92  # how fast eligibility fades (≈12-step half-life)
 
     # ------------------------------------------------------------------
     # Forward pass (vectorised — all nodes fire simultaneously per tick)
@@ -339,6 +350,14 @@ class GraphPolicy:
         self._trace_pre1 = x1.copy()
         self._trace_post = y_gated.copy()
 
+        # Update eligibility traces (decaying accumulation across time steps)
+        # This is the key to temporal credit assignment:
+        # past activity leaves a "synaptic tag" that decays slowly.
+        # When reward arrives later, the tag lets credit flow back in time.
+        self._elig_pre0 = self._elig_decay * self._elig_pre0 + self._trace_pre0
+        self._elig_pre1 = self._elig_decay * self._elig_pre1 + self._trace_pre1
+        self._elig_post = self._elig_decay * self._elig_post + self._trace_post
+
         return R[self.action_base : self.action_base + self.n_actions].copy()
 
     # ------------------------------------------------------------------
@@ -353,13 +372,29 @@ class GraphPolicy:
     # This means the GA doesn't evolve a solution — it evolves a LEARNER.
     # ------------------------------------------------------------------
     def hebbian_update(self, reward: float):
-        """Reward-modulated Hebbian update. Call AFTER each env.step()."""
+        """Reward-modulated Hebbian update with eligibility traces.
+
+        Uses BOTH immediate traces and decaying eligibility traces.
+        - Immediate traces: reinforce what just happened (fast learning)
+        - Eligibility traces: reinforce what happened in the past (temporal credit)
+
+        This is analogous to how dopamine in the brain reinforces not just
+        the current synapse activity, but also recent past activity via
+        synaptic eligibility tags.
+        """
         mod = np.float32(np.clip(reward, -2.0, 2.0))  # modulatory signal
 
-        # Three-factor Hebbian rule
-        self.live_w0   += self.eta_w0   * self._trace_pre0 * self._trace_post * mod
-        self.live_w1   += self.eta_w1   * self._trace_pre1 * self._trace_post * mod
-        self.live_bias += self.eta_bias * self._trace_post * mod
+        # Blend immediate + eligibility traces (50/50)
+        # Immediate: what just fired this step
+        # Eligibility: accumulated decaying trace of past steps
+        eff_pre0 = 0.5 * self._trace_pre0 + 0.5 * self._elig_pre0
+        eff_pre1 = 0.5 * self._trace_pre1 + 0.5 * self._elig_pre1
+        eff_post = 0.5 * self._trace_post + 0.5 * self._elig_post
+
+        # Three-factor Hebbian rule with eligibility
+        self.live_w0   += self.eta_w0   * eff_pre0 * eff_post * mod
+        self.live_w1   += self.eta_w1   * eff_pre1 * eff_post * mod
+        self.live_bias += self.eta_bias * eff_post * mod
 
         # Clamp live weights to prevent runaway
         np.clip(self.live_w0,   -5.0, 5.0, out=self.live_w0)
