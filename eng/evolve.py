@@ -80,7 +80,7 @@ def mutate_inplace(policy, sigma: float):
 class GAConfig:
     pop_size: int = 128
     elites: int = 24
-    episodes: int = 24
+    episodes: int = 48
     max_steps: int = 200
     generations: int = 200
 
@@ -91,7 +91,7 @@ class GAConfig:
     crossover_rate: float = 0.20
 
     # Anti-stagnation
-    stagnation_window: int = 15         # gens w/o improvement before sigma restart
+    stagnation_window: int = 20         # gens w/o improvement before sigma restart
     sigma_restart_mult: float = 2.0     # multiply sigma on restart (legacy, escalation replaces this)
     sigma_restart_cap: float = 2.5      # restart sigma capped at this * mutation_sigma (0.30)
     fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
@@ -109,7 +109,7 @@ class GAConfig:
     tournament_k: int = 4               # tournament size for parent selection
 
     # Elite re-evaluation (noise reduction)
-    reeval_factor: int = 5              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
+    reeval_factor: int = 3              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
 
     # RNG
     seed: int = 0
@@ -238,6 +238,7 @@ def evaluate_policy(policy,
         + 1.0 * door_rate
         + 3.0 * goal_rate
         + 8.0 * strict_sr
+        + 5.0 * strict_sr ** 2   # quadratic bonus: steeper gradient at higher success
     )
 
     return fitness, avg_reward, strict_sr
