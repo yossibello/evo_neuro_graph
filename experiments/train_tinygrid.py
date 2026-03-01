@@ -103,7 +103,7 @@ def main():
     # Graph policy architecture
     ap.add_argument("--graph_nodes", type=int, default=64,
                     help="Number of nodes in graph policy")
-    ap.add_argument("--graph_ticks", type=int, default=3,
+    ap.add_argument("--graph_ticks", type=int, default=5,
                     help="Number of execution ticks per forward pass")
     ap.add_argument("--graph_registers", type=int, default=128,
                     help="Number of registers in graph policy")

@@ -92,8 +92,8 @@ class GAConfig:
 
     # Anti-stagnation
     stagnation_window: int = 15         # gens w/o improvement before sigma restart
-    sigma_restart_mult: float = 2.0     # multiply sigma on restart
-    sigma_restart_cap: float = 1.0      # restart sigma capped at this fraction of initial
+    sigma_restart_mult: float = 2.0     # multiply sigma on restart (legacy, escalation replaces this)
+    sigma_restart_cap: float = 2.5      # restart sigma capped at this * mutation_sigma (0.30)
     fresh_inject_frac: float = 0.05     # fraction of pop replaced with fresh randoms
 
     # Extinction events (biological mass extinction / creative destruction)
@@ -127,7 +127,7 @@ class GAConfig:
 
     # Graph policy config
     graph_nodes: int = 64
-    graph_ticks: int = 3
+    graph_ticks: int = 5
     graph_registers: int = 128
     graph_memory: int = 16
 
@@ -738,8 +738,14 @@ def run_ga(
             if gens_since_improvement >= cfg.stagnation_window:
                 stagnation_restarts += 1
                 old_sigma = sigma
-                sigma_cap = cfg.mutation_sigma * cfg.sigma_restart_cap
-                sigma = min(sigma * cfg.sigma_restart_mult, sigma_cap)
+                # Escalating restart: each restart is progressively more aggressive.
+                # Restart #1: 1.5x initial (0.18), #2: +0.04 (0.22), #3: +0.04 (0.26)...
+                # Like escalating environmental pressure — if a mild shock fails,
+                # hit the population harder next time.
+                base_restart = cfg.mutation_sigma * 1.5
+                escalation  = 0.04 * stagnation_restarts
+                sigma_cap   = cfg.mutation_sigma * cfg.sigma_restart_cap
+                sigma = min(base_restart + escalation, sigma_cap)
                 gens_since_improvement = 0
                 stag_tag = f" | STAG_RESTART #{stagnation_restarts} sigma {old_sigma:.4f}->{sigma:.4f}"
 
@@ -749,7 +755,12 @@ def run_ga(
                 # bottom portion of the population and fill with radically
                 # different alternatives. The strong survive, the stuck die.
                 if stagnation_restarts % cfg.extinction_every_n_stag == 0:
-                    n_kill = int(cfg.pop_size * cfg.extinction_kill_frac)
+                    # Escalating extinction: each event kills more of the population.
+                    # If the first mass extinction didn't help, the next one is harsher.
+                    extinction_num = stagnation_restarts // cfg.extinction_every_n_stag
+                    extra_kill = min(0.10 * (extinction_num - 1), 0.25)
+                    eff_kill_frac = min(cfg.extinction_kill_frac + extra_kill, 0.70)
+                    n_kill = int(cfg.pop_size * eff_kill_frac)
                     # Kill the weakest individuals
                     survivors = [pop[i] for i in order[:cfg.pop_size - n_kill]]
 
@@ -784,7 +795,7 @@ def run_ga(
                         replacements.append(make_policy(cfg.policy, cfg))
 
                     pop = survivors + replacements
-                    stag_tag += f" | EXTINCTION killed {n_kill} (hof_mut={n_hof_mutants}, elite_mut={n_elite_mutants}, fresh={n_randoms})"
+                    stag_tag += f" | EXTINCTION#{extinction_num} killed {n_kill}/{cfg.pop_size} ({eff_kill_frac:.0%}) (hof_mut={n_hof_mutants}, elite_mut={n_elite_mutants}, fresh={n_randoms})"
 
             stats = {
                 "gen": gen,
