@@ -69,7 +69,7 @@ def main():
     ap.add_argument("--max_steps", type=int, default=200)
     ap.add_argument("--mutation_sigma", type=float, default=0.12)
     ap.add_argument("--sigma_decay", type=float, default=0.98)
-    ap.add_argument("--crossover_rate", type=float, default=0.35)
+    ap.add_argument("--crossover_rate", type=float, default=0.20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
     "--policy",
@@ -78,7 +78,7 @@ def main():
     choices=["linear", "mlp", "graph"],)
     ap.add_argument("--generations", type=int, default=200)
     ap.add_argument("--outdir", type=str, default="artifacts")
-    ap.add_argument("--mutation_sigma_floor", type=float, default=0.04)
+    ap.add_argument("--mutation_sigma_floor", type=float, default=0.06)
     ap.add_argument("--init_policy", type=str, default=None,
                 help="Path to a .npz champion to seed the initial population")
     ap.add_argument(

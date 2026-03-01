@@ -87,8 +87,8 @@ class GAConfig:
     # Evolution hyperparams
     mutation_sigma: float = 0.12
     sigma_decay: float = 0.98          # anneal mutation per generation
-    mutation_sigma_floor: float = 0.04
-    crossover_rate: float = 0.35
+    mutation_sigma_floor: float = 0.06
+    crossover_rate: float = 0.20
 
     # Anti-stagnation
     stagnation_window: int = 15         # gens w/o improvement before sigma restart
@@ -101,7 +101,7 @@ class GAConfig:
     extinction_kill_frac: float = 0.40  # fraction of pop wiped in extinction
 
     # Behavioral diversity (fitness sharing)
-    diversity_enabled: bool = True       # penalize identical behaviors
+    diversity_enabled: bool = False      # DISABLED: overhead + corrupts selection; organic diversity via extinction is enough
     diversity_num_seeds: int = 4         # fixed seeds for behavioral fingerprint
     diversity_sharing_sigma: float = 0.3 # sharing radius (lower = more selective, 0.3 = only penalize near-clones)
 
@@ -109,7 +109,7 @@ class GAConfig:
     tournament_k: int = 4               # tournament size for parent selection
 
     # Elite re-evaluation (noise reduction)
-    reeval_factor: int = 3              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
+    reeval_factor: int = 5              # 1 = disabled; >1 = re-evaluate top candidates with N*episodes
 
     # RNG
     seed: int = 0
@@ -657,7 +657,7 @@ def run_ga(
             # Re-evaluate top candidates with more episodes to get stable fitness
             if cfg.reeval_factor > 1:
                 prelim_order = np.argsort(fitness)[::-1]
-                n_reeval = min(2 * cfg.elites, cfg.pop_size)
+                n_reeval = min(3 * cfg.elites, cfg.pop_size)
                 reeval_idxs = prelim_order[:n_reeval]
                 reeval_eps = cfg.episodes * (cfg.reeval_factor - 1)  # additional episodes
 
