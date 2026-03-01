@@ -114,6 +114,13 @@ def main():
     # Anti-stagnation
     ap.add_argument("--tournament_k", type=int, default=4,
                     help="Tournament size for parent selection")
+    # Biological evolution
+    ap.add_argument("--no_self_adaptive_sigma", action="store_true",
+                    help="Disable self-adaptive per-individual sigma")
+    ap.add_argument("--no_novelty", action="store_true",
+                    help="Disable novelty search pressure")
+    ap.add_argument("--cambrian_period", type=int, default=40,
+                    help="Cambrian explosion every N gens (0 = disabled)")
     args = ap.parse_args()
 
     # Configure GA
@@ -137,6 +144,10 @@ def main():
         graph_memory=args.graph_memory,
         stagnation_window=args.stagnation_window,
         tournament_k=args.tournament_k,
+        # Biological evolution
+        self_adaptive_sigma=not args.no_self_adaptive_sigma,
+        novelty_enabled=not args.no_novelty,
+        cambrian_period=args.cambrian_period,
     )
 
     # Run GA (multi-core)
