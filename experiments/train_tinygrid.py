@@ -65,13 +65,13 @@ def main():
     ap = argparse.ArgumentParser(description="Train an evolutionary TinyGrid agent.")
     ap.add_argument("--pop_size", type=int, default=128)
     ap.add_argument("--elites", type=int, default=24)
-    ap.add_argument("--stagnation_window", type=int, default=20,
+    ap.add_argument("--stagnation_window", type=int, default=15,
                     help="Gens without improvement before sigma restart")
     ap.add_argument("--episodes", type=int, default=48)
     ap.add_argument("--max_steps", type=int, default=200)
     ap.add_argument("--mutation_sigma", type=float, default=0.12)
-    ap.add_argument("--sigma_decay", type=float, default=0.98)
-    ap.add_argument("--crossover_rate", type=float, default=0.20)
+    ap.add_argument("--sigma_decay", type=float, default=0.995)
+    ap.add_argument("--crossover_rate", type=float, default=0.30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
     "--policy",
@@ -80,7 +80,7 @@ def main():
     choices=["linear", "mlp", "graph"],)
     ap.add_argument("--generations", type=int, default=200)
     ap.add_argument("--outdir", type=str, default="artifacts")
-    ap.add_argument("--mutation_sigma_floor", type=float, default=0.06)
+    ap.add_argument("--mutation_sigma_floor", type=float, default=0.10)
     ap.add_argument("--init_policy", type=str, default=None,
                 help="Path to a .npz champion to seed the initial population")
     ap.add_argument(
