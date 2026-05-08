@@ -1123,7 +1123,8 @@ def run_ga(
                         print(
                             f"  [ENV-COEVO] gen {gen:03d} | "
                             f"smooth_sr={smooth_sr:.2f} target={target:.2f} | "
-                            f"size={env_kwargs['size']} walls={env_kwargs['num_walls']}"
+                            f"size={env_kwargs['size']} walls={env_kwargs['num_walls']} "
+                            f"(raw: size={coevo_size:.1f} walls={coevo_walls:.1f})"
                         )
 
 
