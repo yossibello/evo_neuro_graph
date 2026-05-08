@@ -1107,6 +1107,9 @@ def run_ga(
                             coevo_size = min(coevo_size + 1.0, s_max)
                             # Reset walls to medium for the bigger grid
                             coevo_walls = max(w_min, coevo_walls - 2.0)
+                            # Clear SR history — old values from smaller grid
+                            # would keep pushing difficulty before agents adapt
+                            coevo_sr_history.clear()
                             changed = True
                     elif smooth_sr < target - 0.10:
                         # Too hard — ease up slightly so learning can resume
