@@ -131,6 +131,19 @@ class GAConfig:
     graph_registers: int = 128
     graph_memory: int = 16
 
+    # ── Environment co-evolution (open-ended autocurriculum) ─────────────
+    # Nature: the environment and organisms co-evolve.  When agents master
+    # the current maze it gets harder; if they can't progress it eases up.
+    # This keeps difficulty permanently at the "edge of learning" —
+    # the key mechanism behind open-ended intelligence in biology.
+    env_coevolve: bool = False          # set True in train script to enable
+    env_target_success: float = 0.25   # keep elite success rate near this
+    env_coevolve_lookback: int = 5      # smooth success over last N gens
+    env_size_min: int = 7
+    env_size_max: int = 13
+    env_walls_min: int = 0
+    env_walls_max: int = 14
+
     # ── Biological evolution parameters ──────────────────────────
 
     # Self-adaptive sigma: each individual evolves its own mutation rate
@@ -776,6 +789,13 @@ def run_ga(
 
     history: List[Dict[str, float]] = []
 
+    # ── Environment co-evolution state ────────────────────────────────────
+    # Tracks the current evolved environment difficulty as continuous values
+    # so small incremental changes accumulate correctly before rounding.
+    coevo_size  = float((env_kwargs or {}).get("size",  7))
+    coevo_walls = float((env_kwargs or {}).get("num_walls", 5))
+    coevo_sr_history: List[float] = []
+
     # Multiprocessing context (spawn works everywhere)
     ctx = mp.get_context("spawn")
     n_proc = cfg.processes or mp.cpu_count()
@@ -1058,8 +1078,55 @@ def run_ga(
                     path = f"artifacts/checkpoints/gen{gen:04d}_rank{rank+1}_f{bf:+.3f}.npz"
                     save_policy_npz(p, path)
 
+            # ---- Environment Co-evolution (Open-ended Autocurriculum) ----
+            # Idea from nature: the environment co-evolves with agents.
+            # When top agents master the current maze, the maze gets harder.
+            # When they can't progress, it eases slightly.
+            # This permanently keeps difficulty at the "edge of learning" —
+            # the regime where the most generalisation happens.
+            # Neither agent NOR environment ever "wins" — like a Red Queen race.
+            if getattr(cfg, 'env_coevolve', False) and env_ctor is not None:
+                top_sr = float(success_rates[order[:cfg.elites]].mean())
+                coevo_sr_history.append(top_sr)
+                lookback = getattr(cfg, 'env_coevolve_lookback', 5)
+                if len(coevo_sr_history) >= lookback:
+                    smooth_sr = float(np.mean(coevo_sr_history[-lookback:]))
+                    target  = float(getattr(cfg, 'env_target_success', 0.25))
+                    w_min   = float(getattr(cfg, 'env_walls_min', 0))
+                    w_max   = float(getattr(cfg, 'env_walls_max', 14))
+                    s_min   = float(getattr(cfg, 'env_size_min',  7))
+                    s_max   = float(getattr(cfg, 'env_size_max',  13))
+                    changed = False
+                    if smooth_sr > target + 0.10:
+                        # Agents mastering it — increase difficulty.
+                        # First add walls, then grow grid size.
+                        if coevo_walls < w_max:
+                            coevo_walls = min(coevo_walls + 0.5, w_max)
+                            changed = True
+                        elif coevo_size < s_max:
+                            coevo_size = min(coevo_size + 1.0, s_max)
+                            # Reset walls to medium for the bigger grid
+                            coevo_walls = max(w_min, coevo_walls - 2.0)
+                            changed = True
+                    elif smooth_sr < target - 0.10:
+                        # Too hard — ease up slightly so learning can resume
+                        coevo_walls = max(coevo_walls - 0.3, w_min)
+                        changed = True
+                    # Push updated parameters into env_kwargs for next generation
+                    env_kwargs = dict(env_kwargs or {})
+                    env_kwargs["size"]      = int(round(coevo_size))
+                    env_kwargs["num_walls"] = int(round(coevo_walls))
+                    stats["env_size"]   = int(round(coevo_size))
+                    stats["env_walls"]  = int(round(coevo_walls))
+                    stats["env_sr_smooth"] = float(smooth_sr)
+                    if changed:
+                        print(
+                            f"  [ENV-COEVO] gen {gen:03d} | "
+                            f"smooth_sr={smooth_sr:.2f} target={target:.2f} | "
+                            f"size={env_kwargs['size']} walls={env_kwargs['num_walls']}"
+                        )
 
-            # ---- Reproduction (biological, with self-adaptive sigma) ----
+
             new_pop: List[Any] = []
             new_sigmas: List[float] = []
 

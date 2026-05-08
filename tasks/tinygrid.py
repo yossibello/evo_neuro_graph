@@ -112,13 +112,16 @@ class TinyGrid:
         size: int = 7,
         max_steps: int = 128,
         difficulty: str = "medium",
+        num_walls: int | None = None,   # override difficulty-based wall count (for co-evolution)
     ):
         self.size = size
         self.max_steps = max_steps
         self.difficulty = difficulty
 
-        # Difficulty → number of inner walls
-        if self.difficulty == "easy":
+        # Difficulty → number of inner walls (explicit num_walls overrides difficulty)
+        if num_walls is not None:
+            self.num_walls = int(num_walls)
+        elif self.difficulty == "easy":
             self.num_walls = 0
         elif self.difficulty == "hard":
             self.num_walls = 8

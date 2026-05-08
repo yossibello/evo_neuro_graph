@@ -121,6 +121,15 @@ def main():
                     help="Disable novelty search pressure")
     ap.add_argument("--cambrian_period", type=int, default=40,
                     help="Cambrian explosion every N gens (0 = disabled)")
+    # Environment co-evolution
+    ap.add_argument("--env_coevolve", action="store_true",
+                    help="Enable environment co-evolution (autocurriculum)")
+    ap.add_argument("--env_target_success", type=float, default=0.25,
+                    help="Elite success rate co-evolution targets (default 0.25)")
+    ap.add_argument("--env_size_max", type=int, default=13,
+                    help="Max grid size during co-evolution")
+    ap.add_argument("--env_walls_max", type=int, default=14,
+                    help="Max inner walls during co-evolution")
     args = ap.parse_args()
 
     # Configure GA
@@ -148,6 +157,11 @@ def main():
         self_adaptive_sigma=not args.no_self_adaptive_sigma,
         novelty_enabled=not args.no_novelty,
         cambrian_period=args.cambrian_period,
+        # Environment co-evolution
+        env_coevolve=args.env_coevolve,
+        env_target_success=args.env_target_success,
+        env_size_max=args.env_size_max,
+        env_walls_max=args.env_walls_max,
     )
 
     # Run GA (multi-core)
